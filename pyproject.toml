@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "seedlink-client"
+dynamic = ["version"]
+description = "SeedLink protocol 3.x and 4.x client for streaming geophysical (seismic) data"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.11"
+authors = [
+    { name = "EarthScope Data Services", email = "software@earthscope.org" },
+]
+keywords = ["seedlink", "seismology", "ringserver", "earthscope"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering",
+]
+dependencies = ["pymseed>=0.9.3"]
+
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+
+[project.scripts]
+seedlink-client = "seedlink_client:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.hatch.version]
+path = "src/seedlink_client/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/seedlink_client"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/seedlink_client"]
+
