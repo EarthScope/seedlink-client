@@ -36,6 +36,22 @@ _MSEED2_SUBFORMATS = {
 
 _JSON_SUBFORMATS = {"I": "INFO in JSON", "E": "ERROR in JSON"}
 
+# Cache for _verbose_timestamp_prefix(): the "%Y-%m-%dT%H:%M:%S" formatting
+# only needs to happen once per wall-clock second, not once per packet.
+_verbose_ts_second: datetime.datetime | None = None
+_verbose_ts_prefix = ""
+
+
+def _verbose_timestamp_prefix(now: datetime.datetime) -> str:
+    """Format now down to the second, cached across calls within the same
+    second; callers append their own sub-second precision."""
+    global _verbose_ts_second, _verbose_ts_prefix
+    sec = now.replace(microsecond=0)
+    if sec != _verbose_ts_second:
+        _verbose_ts_prefix = f"{now:%Y-%m-%dT%H:%M:%S}"
+        _verbose_ts_second = sec
+    return _verbose_ts_prefix
+
 
 def _payload_format_str(fmt: str, subfmt: str) -> str:
     """Human-readable payload format, matching slinktool's sl_formatstr()."""
@@ -97,7 +113,7 @@ def _print_packet(pkt: SeedLinkPacket, details: int = 0, unpack: bool = False, v
     if verbose:
         now = datetime.datetime.now()
         seq = pkt.seqnum if pkt.seqnum is not None else "-"
-        print(f"{now:%Y-%m-%dT%H:%M:%S}.{now.microsecond // 1000:03d} (local), "
+        print(f"{_verbose_timestamp_prefix(now)}.{now.microsecond // 1000:03d} (local), "
               f"seq {seq}, Received {len(pkt.payload)} bytes of payload format "
               f"{_payload_format_str(pkt.payload_format, pkt.payload_subformat)}")
 

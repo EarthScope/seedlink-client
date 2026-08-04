@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import copy
+import dataclasses
+import pickle
+
+from seedlink_client.protocol import SeedLinkError
 from seedlink_client.streams import (
     Stream,
     parse_streamlist,
@@ -144,3 +149,87 @@ class TestStreamMatches:
         stream = Stream(station_id="IU_COLA")
         assert stream.matches("IU_COLA")
         assert not stream.matches("IU_KONO")
+
+    def test_question_mark_wildcard(self):
+        stream = Stream(station_id="IU_K?NO")
+        assert stream.matches("IU_KONO")
+        assert not stream.matches("IU_KXXO")
+
+    def test_compiled_pattern_cache_invalidated_on_change(self):
+        stream = Stream(station_id="IU_*")
+        assert stream.matches("IU_KONO")
+        stream.station_id = "GE_*"
+        assert not stream.matches("IU_KONO")
+        assert stream.matches("GE_WLF")
+
+
+class _FakePacket:
+    """Stands in for a SeedLinkPacket: only .record() is ever called on it."""
+
+    def __init__(self, starttime=None, error=None):
+        self._starttime = starttime
+        self._error = error
+        self.parse_count = 0
+
+    def record(self):
+        self.parse_count += 1
+        if self._error is not None:
+            raise self._error
+        return self
+
+    def starttime_str(self):
+        return self._starttime
+
+
+class TestStreamTimestampDeferred:
+    def test_resolved_lazily_and_cached(self):
+        stream = Stream(station_id="IU_KONO")
+        pkt = _FakePacket(starttime="2025-01-01T00:00:00.0000Z")
+        stream._ts_pkt = pkt
+        assert pkt.parse_count == 0  # not parsed until read
+        assert stream.timestamp == "2025-01-01T00:00:00.0000Z"
+        assert stream.timestamp == "2025-01-01T00:00:00.0000Z"
+        assert pkt.parse_count == 1  # second read used the cached string
+
+    def test_unparseable_payload_keeps_previous_timestamp(self):
+        stream = Stream(station_id="IU_KONO", timestamp="2020-01-01T00:00:00.0000Z")
+        stream._ts_pkt = _FakePacket(error=SeedLinkError("not miniSEED"))
+        assert stream.timestamp == "2020-01-01T00:00:00.0000Z"
+
+    def test_direct_assignment_overrides_pending_packet(self):
+        pkt = _FakePacket(starttime="2025-01-01T00:00:00.0000Z")
+        stream = Stream(station_id="IU_KONO")
+        stream._ts_pkt = pkt
+        stream.timestamp = "2030-01-01T00:00:00.0000Z"
+        assert stream.timestamp == "2030-01-01T00:00:00.0000Z"
+        assert pkt.parse_count == 0  # overwritten, never parsed
+
+
+class TestStreamCopySemantics:
+    """dataclass repr/eq/asdict and pickle/deepcopy must behave exactly as
+    they would for a plain (non-deferred) timestamp field."""
+
+    def test_repr_and_eq_unaffected(self):
+        a = Stream(station_id="IU_KONO", timestamp="2020-01-01T00:00:00.0000Z")
+        b = Stream(station_id="IU_KONO", timestamp="2020-01-01T00:00:00.0000Z")
+        assert a == b
+        assert "timestamp='2020-01-01T00:00:00.0000Z'" in repr(a)
+
+    def test_asdict(self):
+        stream = Stream(station_id="IU_KONO", timestamp="2020-01-01T00:00:00.0000Z")
+        assert dataclasses.asdict(stream) == {
+            "station_id": "IU_KONO", "selectors": [], "seqnum": None,
+            "all_data": False, "timestamp": "2020-01-01T00:00:00.0000Z",
+        }
+
+    def test_deepcopy_resolves_and_drops_pending_packet(self):
+        stream = Stream(station_id="IU_KONO")
+        stream._ts_pkt = _FakePacket(starttime="2025-06-01T00:00:00.0000Z")
+        clone = copy.deepcopy(stream)
+        assert clone.timestamp == "2025-06-01T00:00:00.0000Z"
+        assert "_ts_pkt" not in clone.__dict__
+
+    def test_pickle_roundtrip(self):
+        stream = Stream(station_id="IU_KONO", seqnum=5, timestamp="2020-01-01T00:00:00.0000Z")
+        clone = pickle.loads(pickle.dumps(stream))
+        assert clone == stream

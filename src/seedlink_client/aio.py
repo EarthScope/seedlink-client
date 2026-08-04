@@ -60,6 +60,13 @@ logger = logging.getLogger(__name__)
 _RECV_BUF_SIZE = 65536
 _POLL_INTERVAL = 1.0
 
+# First-byte values of a v3/v4 packet signature ('S' + 'L' or 'E'), checked
+# directly against the receive buffer in _classify_next() so the steady
+# state of packet-after-packet streaming never allocates a bytes object.
+_ORD_S = ord("S")
+_ORD_L = ord("L")
+_ORD_E = ord("E")
+
 
 class AsyncSeedLink(_SeedLinkBase):
     """Asyncio SeedLink client, offering the same API as :class:`~seedlink_client.client.SeedLink`.
@@ -335,16 +342,17 @@ class AsyncSeedLink(_SeedLinkBase):
         """Classify the next bytes, peeking incrementally so a bare 3-byte
         dial-up END with nothing behind it doesn't block waiting for a
         5-byte peek."""
-        prefix = await self._peek(1)
-        if prefix == b"S":
-            if classify_stream_prefix(await self._peek(2)) is StreamEvent.PACKET:
-                return StreamEvent.PACKET
-        elif prefix == b"E":
+        await self._ensure(2)
+        first, second = self._recv_buf[self._recv_start], self._recv_buf[self._recv_start + 1]
+        if first == _ORD_S and second in (_ORD_L, _ORD_E):
+            return StreamEvent.PACKET  # steady state: 'SL'/'SE' packet signature
+        if first == _ORD_E:
             event = classify_stream_prefix(await self._peek(3))
             if event is StreamEvent.OTHER:
                 event = classify_stream_prefix(await self._peek(5))
             if event in (StreamEvent.END, StreamEvent.ERROR):
                 return event
+        prefix = bytes(self._recv_view[self._recv_start:self._recv_start + 1])
         raise SeedLinkError(f"Unexpected data in stream: {prefix!r}")
 
     async def _read_mseed_payload(self) -> bytes:
@@ -376,12 +384,21 @@ class AsyncSeedLink(_SeedLinkBase):
         )
 
     async def _recv_frame_v4(self) -> _RawFrame:
-        header = parse_header_v4(await self._read_exact(HEADSIZE_V4))
-        station_id = (
-            (await self._read_exact(header.station_id_length)).decode("ascii")
-            if header.station_id_length else ""
-        )
-        payload = await self._read_exact(header.payload_length)
+        # A single _ensure() for the whole frame, rather than one per field,
+        # avoids repeatedly re-walking _ensure()'s compaction/grow logic and
+        # copying each field out separately.
+        await self._ensure(HEADSIZE_V4)
+        header = parse_header_v4(self._recv_view[self._recv_start:self._recv_start + HEADSIZE_V4])
+        total = HEADSIZE_V4 + header.station_id_length + header.payload_length
+        await self._ensure(total)
+        pos = self._recv_start + HEADSIZE_V4
+        if header.station_id_length:
+            station_id = bytes(self._recv_view[pos:pos + header.station_id_length]).decode("ascii")
+            pos += header.station_id_length
+        else:
+            station_id = ""
+        payload = bytes(self._recv_view[pos:pos + header.payload_length])
+        self._recv_start += total
         return _RawFrame(
             station_id=station_id, seqnum=header.seqnum,
             payload_format=header.payload_format, payload_subformat=header.payload_subformat,
@@ -430,6 +447,7 @@ class AsyncSeedLink(_SeedLinkBase):
             raise SeedLinkTimeout("Timed out negotiating stream selection") from e
 
     async def _negotiate(self) -> None:
+        self._match_cache.clear()
         if not self._streams:
             self._streams = [Stream(station_id="*")]
         plan = _commands.plan_negotiation(
@@ -462,13 +480,11 @@ class AsyncSeedLink(_SeedLinkBase):
     def _update_stream_state(self, pkt: SeedLinkPacket) -> None:
         if pkt.seqnum is None:
             return
-        for stream in self._streams:
-            if stream.matches(pkt.station_id):
-                stream.seqnum = pkt.seqnum
-                try:
-                    stream.timestamp = pkt.record().starttime_str()
-                except SeedLinkError:
-                    pass
+        for stream in self._streams_matching(pkt.station_id):
+            stream.seqnum = pkt.seqnum
+            # Deferred: the packet is only parsed for its start time if
+            # stream.timestamp is actually read (see Stream._get_timestamp).
+            stream._ts_pkt = pkt
 
     async def _reconnect_after_delay(self) -> None:
         await asyncio.sleep(self._reconnect_delay)

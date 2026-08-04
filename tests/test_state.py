@@ -26,6 +26,24 @@ class TestSaveState:
         save_state(str(path), [Stream(station_id="IU_COLA", seqnum=5)])
         assert path.read_text().splitlines()[1] == "IU_COLA 5"
 
+    def test_deferred_timestamp_resolved_on_save(self, tmp_path):
+        """A stream whose timestamp hasn't been read yet (set from a live
+        packet during collect(), see Stream._get_timestamp) still resolves
+        and saves correctly."""
+
+        class _FakePacket:
+            def record(self):
+                return self
+
+            def starttime_str(self):
+                return "2025-12-07T21:48:51.0445Z"
+
+        path = tmp_path / "state.txt"
+        stream = Stream(station_id="IU_COLA", seqnum=5)
+        stream._ts_pkt = _FakePacket()
+        save_state(str(path), [stream])
+        assert path.read_text().splitlines()[1] == "IU_COLA 5 2025-12-07T21:48:51.0445Z"
+
 
 class TestLoadState:
     def test_round_trip(self, tmp_path):

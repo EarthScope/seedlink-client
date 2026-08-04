@@ -189,7 +189,7 @@ class HeaderV3:
     info_continues: bool  # only meaningful when is_info is True
 
 
-@dataclass
+@dataclass(slots=True)
 class HeaderV4:
     """Parsed v4 packet header (17 bytes, station ID follows separately)."""
 

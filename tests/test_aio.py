@@ -141,6 +141,10 @@ class TestStreaming:
                 assert packets[0].station_id == "IU_KONO"
                 assert packets[0].seqnum == 7
                 assert packets[0].payload == b"waveformbytes"
+                # _update_stream_state() applied the seqnum via the memoized
+                # station-match cache (see _SeedLinkBase._streams_matching).
+                assert sl._streams[0].seqnum == 7
+                assert sl._match_cache["IU_KONO"] == [sl._streams[0]]
             server.close()
 
         run(scenario())

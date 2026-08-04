@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 from unittest.mock import MagicMock
 
 from pymseed import DataEncoding, MS3Record, timestr2nstime
@@ -16,6 +17,7 @@ from seedlink_client.cli import (
     _payload_format_str,
     _print_info,
     _print_packet,
+    _verbose_timestamp_prefix,
 )
 from seedlink_client.protocol import Protocol, SeedLinkPacket
 
@@ -176,6 +178,19 @@ class TestPayloadFormatStr:
 
     def test_unrecognized(self):
         assert _payload_format_str("?", "") == "Unrecognized payload type"
+
+
+class TestVerboseTimestampPrefix:
+    def test_cached_within_same_second(self):
+        now = datetime.datetime(2025, 1, 1, 12, 0, 0, 123456)
+        first = _verbose_timestamp_prefix(now)
+        later_in_same_second = _verbose_timestamp_prefix(now.replace(microsecond=999000))
+        assert first == later_in_same_second == "2025-01-01T12:00:00"
+
+    def test_recomputed_on_new_second(self):
+        _verbose_timestamp_prefix(datetime.datetime(2025, 1, 1, 12, 0, 0))
+        next_second = _verbose_timestamp_prefix(datetime.datetime(2025, 1, 1, 12, 0, 1))
+        assert next_second == "2025-01-01T12:00:01"
 
 
 class TestPrintPacket:

@@ -55,6 +55,7 @@ class _SeedLinkBase:
         self._clientversion = clientversion
         self._auth = auth
         self._streams: list[Stream] = []
+        self._match_cache: dict[str, list[Stream]] = {}
         self._multistation = False
         self._all_stations = False
         self._start_time: datetime | None = None
@@ -154,6 +155,18 @@ class _SeedLinkBase:
         self.server_capabilities = capabilities
         self._server_protocol_majors = protocol_majors
 
+    def _streams_matching(self, station_id: str) -> list[Stream]:
+        """Streams whose pattern matches ``station_id``, cached per station ID.
+
+        Invalidated whenever the stream list changes; see the ``_streams``
+        mutators below and each transport's ``negotiate()``.
+        """
+        cached = self._match_cache.get(station_id)
+        if cached is None:
+            cached = [s for s in self._streams if s.matches(station_id)]
+            self._match_cache[station_id] = cached
+        return cached
+
     # -- Stream selection -----------------------------------------------------
 
     def add_stream(
@@ -182,6 +195,7 @@ class _SeedLinkBase:
                    all_data=all_data, timestamp=timestamp)
         )
         self._multistation = True
+        self._match_cache.clear()
 
     def set_all_stations(
         self,
@@ -200,6 +214,7 @@ class _SeedLinkBase:
         ]
         self._multistation = False
         self._all_stations = True
+        self._match_cache.clear()
 
     def add_streamlist(self, text: str, default_selectors: str | None = None) -> None:
         """Add streams from a stream-list string; see :func:`streams.parse_streamlist`."""
@@ -207,6 +222,7 @@ class _SeedLinkBase:
             raise SeedLinkError("Cannot mix add_streamlist() with set_all_stations()")
         self._streams.extend(streams.parse_streamlist(text, default_selectors))
         self._multistation = True
+        self._match_cache.clear()
 
     def add_streamlist_file(self, path: str, default_selectors: str | None = None) -> None:
         """Add streams from a stream-list file; see :func:`streams.read_streamlist_file`."""
@@ -214,6 +230,7 @@ class _SeedLinkBase:
             raise SeedLinkError("Cannot mix add_streamlist_file() with set_all_stations()")
         self._streams.extend(streams.read_streamlist_file(path, default_selectors))
         self._multistation = True
+        self._match_cache.clear()
 
     def set_timewindow(self, start: str | datetime, end: str | datetime | None = None) -> None:
         """Request a fixed time window instead of resuming from a sequence number."""

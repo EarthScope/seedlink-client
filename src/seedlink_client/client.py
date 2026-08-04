@@ -52,8 +52,15 @@ _RECV_BUF_SIZE = 65536
 # clocks when no data is arriving.
 _POLL_INTERVAL = 1.0
 
+# First-byte values of a v3/v4 packet signature ('S' + 'L' or 'E'), checked
+# directly against the receive buffer in _classify_next() so the steady
+# state of packet-after-packet streaming never allocates a bytes object.
+_ORD_S = ord("S")
+_ORD_L = ord("L")
+_ORD_E = ord("E")
 
-@dataclass
+
+@dataclass(slots=True)
 class _RawFrame:
     """One decoded packet frame, before being wrapped as a public SeedLinkPacket.
 
@@ -138,6 +145,7 @@ class SeedLink(_SeedLinkBase):
             clientname=clientname, clientversion=clientversion, auth=auth,
         )
         self._sock: socket.socket | None = None
+        self._is_ssl = False
         self._recv_buf = bytearray(_RECV_BUF_SIZE)
         self._recv_view = memoryview(self._recv_buf)
         self._recv_start = 0
@@ -182,6 +190,7 @@ class SeedLink(_SeedLinkBase):
                         context.verify_mode = ssl.CERT_NONE
                     sock = context.wrap_socket(sock, server_hostname=self._host)
                 self._sock = sock
+                self._is_ssl = isinstance(sock, ssl.SSLSocket)
                 self._reset_recv_buf()
                 sock = None  # ownership transferred to self._sock
                 break
@@ -244,6 +253,7 @@ class SeedLink(_SeedLinkBase):
                     self._sock.close()
                 finally:
                     self._sock = None
+        self._is_ssl = False
         self._streaming = False
         self._batch_active = False
         self._reset_recv_buf()
@@ -282,7 +292,7 @@ class SeedLink(_SeedLinkBase):
     def _has_buffered(self) -> bool:
         if self._recv_end > self._recv_start:
             return True
-        return isinstance(self._sock, ssl.SSLSocket) and self._sock.pending() > 0
+        return self._is_ssl and self._sock.pending() > 0
 
     def _poll_readable(self, timeout: float) -> bool:
         if self._has_buffered():
@@ -394,16 +404,17 @@ class SeedLink(_SeedLinkBase):
         """Classify the next bytes, peeking incrementally so a bare 3-byte
         dial-up END with nothing behind it doesn't block waiting for a
         5-byte peek."""
-        prefix = self._peek(1)
-        if prefix == b"S":
-            if classify_stream_prefix(self._peek(2)) is StreamEvent.PACKET:
-                return StreamEvent.PACKET
-        elif prefix == b"E":
+        self._ensure(2)
+        first, second = self._recv_buf[self._recv_start], self._recv_buf[self._recv_start + 1]
+        if first == _ORD_S and second in (_ORD_L, _ORD_E):
+            return StreamEvent.PACKET  # steady state: 'SL'/'SE' packet signature
+        if first == _ORD_E:
             event = classify_stream_prefix(self._peek(3))
             if event is StreamEvent.OTHER:
                 event = classify_stream_prefix(self._peek(5))
             if event in (StreamEvent.END, StreamEvent.ERROR):
                 return event
+        prefix = bytes(self._recv_view[self._recv_start:self._recv_start + 1])
         raise SeedLinkError(f"Unexpected data in stream: {prefix!r}")
 
     def _read_mseed_payload(self) -> bytes:
@@ -436,9 +447,21 @@ class SeedLink(_SeedLinkBase):
         )
 
     def _recv_frame_v4(self) -> _RawFrame:
-        header = parse_header_v4(self._take(HEADSIZE_V4))
-        station_id = self._take(header.station_id_length).decode("ascii") if header.station_id_length else ""
-        payload = self._take(header.payload_length)
+        # A single _ensure() for the whole frame, rather than one per field,
+        # avoids repeatedly re-walking _ensure()'s compaction/grow logic and
+        # copying each field out separately.
+        self._ensure(HEADSIZE_V4)
+        header = parse_header_v4(self._recv_view[self._recv_start:self._recv_start + HEADSIZE_V4])
+        total = HEADSIZE_V4 + header.station_id_length + header.payload_length
+        self._ensure(total)
+        pos = self._recv_start + HEADSIZE_V4
+        if header.station_id_length:
+            station_id = bytes(self._recv_view[pos:pos + header.station_id_length]).decode("ascii")
+            pos += header.station_id_length
+        else:
+            station_id = ""
+        payload = bytes(self._recv_view[pos:pos + header.payload_length])
+        self._recv_start += total
         return _RawFrame(
             station_id=station_id, seqnum=header.seqnum,
             payload_format=header.payload_format, payload_subformat=header.payload_subformat,
@@ -487,6 +510,7 @@ class SeedLink(_SeedLinkBase):
             SeedLinkError: if no station was accepted (v3 multi-station), or
                 (v4) if any STATION/SELECT/DATA command was rejected.
         """
+        self._match_cache.clear()
         if not self._streams:
             self._streams = [Stream(station_id="*")]
         plan = _commands.plan_negotiation(
@@ -519,13 +543,11 @@ class SeedLink(_SeedLinkBase):
     def _update_stream_state(self, pkt: SeedLinkPacket) -> None:
         if pkt.seqnum is None:
             return
-        for stream in self._streams:
-            if stream.matches(pkt.station_id):
-                stream.seqnum = pkt.seqnum
-                try:
-                    stream.timestamp = pkt.record().starttime_str()
-                except SeedLinkError:
-                    pass
+        for stream in self._streams_matching(pkt.station_id):
+            stream.seqnum = pkt.seqnum
+            # Deferred: the packet is only parsed for its start time if
+            # stream.timestamp is actually read (see Stream._get_timestamp).
+            stream._ts_pkt = pkt
 
     def _reconnect_after_delay(self) -> None:
         time.sleep(self._reconnect_delay)

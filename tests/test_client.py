@@ -12,6 +12,7 @@ from seedlink_client.protocol import (
     Protocol,
     SeedLinkAuthError,
     SeedLinkError,
+    SeedLinkPacket,
     SeedLinkTimeout,
 )
 from seedlink_client.streams import Stream
@@ -106,6 +107,87 @@ class TestRecvFrameV4:
         frame = client._recv_frame()
         assert frame.payload_format == "J"
         assert frame.payload_subformat == "I"
+
+    def test_frame_split_across_many_small_reads(self):
+        """_recv_frame_v4() ensures the header, then the whole remainder, in
+        just two _ensure() calls -- exercise that against a socket that
+        delivers one byte per recv_into(), which forces multiple buffer
+        compactions in between."""
+        client = make_client(Protocol.V4)
+        frame_bytes = _v4_frame(b"payloadbytes", station_id="IU_KONO", seqnum=99)
+        chunks = iter([frame_bytes[i:i + 1] for i in range(len(frame_bytes))])
+
+        def _recv_into(buf):
+            chunk = next(chunks, b"")
+            buf[:len(chunk)] = chunk
+            return len(chunk)
+
+        client._sock.recv_into = MagicMock(side_effect=_recv_into)
+        frame = client._recv_frame()
+        assert frame.station_id == "IU_KONO"
+        assert frame.seqnum == 99
+        assert frame.payload == b"payloadbytes"
+
+
+class TestHasBuffered:
+    def test_buffered_bytes_short_circuits(self):
+        client = make_client(Protocol.V4)
+        client._recv_start, client._recv_end = 0, 5
+        assert client._has_buffered()
+        client._sock.pending.assert_not_called()
+
+    def test_empty_buffer_non_ssl_socket_skips_pending(self):
+        client = make_client(Protocol.V4)
+        client._recv_start = client._recv_end = 0
+        client._is_ssl = False
+        assert not client._has_buffered()
+        client._sock.pending.assert_not_called()
+
+    def test_empty_buffer_ssl_socket_checks_pending(self):
+        client = make_client(Protocol.V4)
+        client._recv_start = client._recv_end = 0
+        client._is_ssl = True
+        client._sock.pending.return_value = 3
+        assert client._has_buffered()
+
+
+class TestUpdateStreamState:
+    def test_matching_stream_gets_seqnum_deferred_timestamp(self):
+        client = make_client(Protocol.V4)
+        stream = Stream(station_id="IU_KONO")
+        client._streams = [stream]
+        pkt = SeedLinkPacket(station_id="IU_KONO", seqnum=7, payload_format="2",
+                              payload_subformat="D", payload=b"not really miniSEED")
+        client._update_stream_state(pkt)
+        assert stream.seqnum == 7
+        # The payload above isn't parseable miniSEED, so if the timestamp
+        # were resolved eagerly this packet would raise; storing it
+        # unresolved instead proves the parse is deferred.
+        assert stream.__dict__.get("_ts_pkt") is pkt
+
+    def test_no_seqnum_is_a_noop(self):
+        client = make_client(Protocol.V4)
+        stream = Stream(station_id="IU_KONO", seqnum=3)
+        client._streams = [stream]
+        pkt = SeedLinkPacket(station_id="IU_KONO", seqnum=None, payload_format="2",
+                              payload_subformat="D", payload=b"x")
+        client._update_stream_state(pkt)
+        assert stream.seqnum == 3
+        assert "_ts_pkt" not in stream.__dict__
+
+    def test_match_cache_reused_then_invalidated_by_add_stream(self):
+        client = make_client(Protocol.V4)
+        stream = Stream(station_id="IU_*")
+        client._streams = [stream]
+        pkt = SeedLinkPacket(station_id="IU_KONO", seqnum=1, payload_format="2",
+                              payload_subformat="D", payload=b"x")
+        client._update_stream_state(pkt)
+        cached = client._match_cache["IU_KONO"]
+        assert cached == [stream]
+        client._update_stream_state(pkt)
+        assert client._match_cache["IU_KONO"] is cached  # reused, not rebuilt
+        client.add_stream("GE_WLF")
+        assert client._match_cache == {}
 
 
 class TestSendCommand:
