@@ -9,11 +9,16 @@ import pytest
 
 from seedlink_client.client import SeedLink
 from seedlink_client.protocol import (
+    FORMAT_JSON,
+    FORMAT_XML,
+    SUBFORMAT_JSON_ERROR,
+    SUBFORMAT_JSON_INFO,
     Protocol,
     SeedLinkAuthError,
     SeedLinkError,
     SeedLinkPacket,
     SeedLinkTimeout,
+    _RawFrame,
 )
 from seedlink_client.streams import Stream
 
@@ -163,7 +168,7 @@ class TestUpdateStreamState:
         # The payload above isn't parseable miniSEED, so if the timestamp
         # were resolved eagerly this packet would raise; storing it
         # unresolved instead proves the parse is deferred.
-        assert stream.__dict__.get("_ts_pkt") is pkt
+        assert stream.pending_packet is pkt
 
     def test_no_seqnum_is_a_noop(self):
         client = make_client(Protocol.V4)
@@ -173,7 +178,7 @@ class TestUpdateStreamState:
                               payload_subformat="D", payload=b"x")
         client._update_stream_state(pkt)
         assert stream.seqnum == 3
-        assert "_ts_pkt" not in stream.__dict__
+        assert stream.pending_packet is None
 
     def test_match_cache_reused_then_invalidated_by_add_stream(self):
         client = make_client(Protocol.V4)
@@ -220,6 +225,28 @@ class TestSendCommand:
         from seedlink_client._commands import bye
         with pytest.raises(SeedLinkError):
             client._send_command(bye())
+
+    def test_realistic_jwt_length_command_is_sent(self):
+        """A real AUTH JWT token routinely runs several hundred bytes --
+        well past the v4 spec's 255-byte command line limit, which is
+        enforced at MAX_COMMAND_LEN's much larger, deliberate ceiling
+        instead (see protocol.MAX_COMMAND_LEN)."""
+        client = make_client(Protocol.V4)
+        client._sock.recv_into = MagicMock(side_effect=_mock_recv_stream(b"OK\r\n"))
+        from seedlink_client._commands import auth_jwt
+
+        token = "x" * 800
+        client._send_command(auth_jwt(token))
+        client._sock.sendall.assert_called_once_with(f"AUTH JWT {token}\r\n".encode("ascii"))
+
+    def test_command_past_max_length_rejected(self):
+        client = make_client(Protocol.V4)
+        from seedlink_client._commands import auth_jwt
+        from seedlink_client.protocol import MAX_COMMAND_LEN
+
+        token = "x" * MAX_COMMAND_LEN
+        with pytest.raises(SeedLinkError):
+            client._send_command(auth_jwt(token))
 
 
 class TestNegotiateV3MultiStationSkip:
@@ -278,6 +305,25 @@ class TestNegotiateV4HardFail:
             client.negotiate()
 
 
+class TestConnectHandshakeFlag:
+    def test_handshake_false_skips_hello(self, monkeypatch):
+        client = SeedLink(host="localhost", port=18000, tls=False)
+        monkeypatch.setattr(client, "_connect_socket", MagicMock())
+        monkeypatch.setattr(client, "_do_hello", MagicMock())
+        client.connect(handshake=False)
+        client._connect_socket.assert_called_once()
+        client._do_hello.assert_not_called()
+        assert client.protocol is None
+
+    def test_handshake_true_runs_hello(self, monkeypatch):
+        client = SeedLink(host="localhost", port=18000, tls=False)
+        monkeypatch.setattr(client, "_connect_socket", MagicMock())
+        monkeypatch.setattr(client, "_do_hello", MagicMock())
+        client.connect()
+        client._connect_socket.assert_called_once()
+        client._do_hello.assert_called_once_with()
+
+
 class TestAuthFailure:
     def test_auth_userpass_rejected_raises_autherror(self):
         client = make_client(Protocol.V4)
@@ -303,19 +349,15 @@ class TestReadLine:
 
 class TestRecvAllTimeout:
     def test_clean_timeout_raises_without_closing(self):
-        import socket
-
         client = make_client(Protocol.V4)
-        client._sock.recv_into = MagicMock(side_effect=socket.timeout("timed out"))
+        client._sock.recv_into = MagicMock(side_effect=TimeoutError("timed out"))
         with pytest.raises(SeedLinkTimeout):
             client._ensure(5)
         assert client.is_connected
 
     def test_partial_read_timeout_closes_connection(self):
-        import socket
-
         client = make_client(Protocol.V4)
-        client._sock.recv_into = MagicMock(side_effect=[2, socket.timeout("timed out")])
+        client._sock.recv_into = MagicMock(side_effect=[2, TimeoutError("timed out")])
         with pytest.raises(SeedLinkTimeout, match="partial"):
             client._ensure(5)
         assert not client.is_connected
@@ -326,6 +368,62 @@ class TestRecvAllTimeout:
         with pytest.raises(SeedLinkError, match="Connection closed"):
             client._ensure(5)
         assert not client.is_connected
+
+
+class TestCollectIdleTimeout:
+    """B7 regression: the idle timeout must fire even when the socket
+    keeps reporting data available, as long as none of it is real
+    (non-INFO) data -- see collect()'s idle-timeout comment."""
+
+    def _info_frame(self) -> _RawFrame:
+        return _RawFrame(station_id="", seqnum=None, payload_format=FORMAT_XML,
+                          payload_subformat=SUBFORMAT_JSON_INFO, payload=b"<x/>",
+                          info_continues=False)
+
+    def test_fires_despite_constant_info_traffic(self):
+        client = make_client(Protocol.V4)
+        client._streaming = True
+        client._idle_timeout = 0.05
+        client._poll_readable = lambda timeout: True
+        client._recv_frame = self._info_frame
+        with pytest.raises(SeedLinkTimeout, match="No data"):
+            next(client.collect(reconnect=False))
+
+    def test_keepalive_still_sent_while_quiet(self):
+        """A quiet channel (nothing readable) still gets its periodic INFO
+        ID heartbeat -- eventually hits the idle timeout too, here just used
+        as a bound so the test doesn't hang."""
+        client = make_client(Protocol.V4)
+        client._streaming = True
+        client._idle_timeout = 0.2
+        client._keepalive = 0.05
+        client._poll_readable = lambda timeout: False
+        client._send_command = MagicMock(return_value=None)
+        with pytest.raises(SeedLinkTimeout):
+            next(client.collect(reconnect=False))
+        client._send_command.assert_called()
+        assert client._send_command.call_args_list[0].args[0].text == "INFO ID"
+
+
+class TestCollectJsonError:
+    """A mid-stream v4 JSON ERROR packet must be handled the same way a
+    synchronous ERROR reply line is -- logged and reconnected/raised --
+    not yielded to the caller as an ordinary data packet."""
+
+    def _error_frame(self) -> _RawFrame:
+        return _RawFrame(station_id="", seqnum=None, payload_format=FORMAT_JSON,
+                          payload_subformat=SUBFORMAT_JSON_ERROR,
+                          payload=b'{"message": "no such station"}', info_continues=False)
+
+    def test_raised_when_reconnect_false(self, caplog):
+        client = make_client(Protocol.V4)
+        client._streaming = True
+        client._poll_readable = lambda timeout: True
+        client._recv_frame = self._error_frame
+        with caplog.at_level("WARNING"):
+            with pytest.raises(SeedLinkError, match="no such station"):
+                next(client.collect(reconnect=False))
+        assert "no such station" in caplog.text
 
 
 class TestFromServerString:

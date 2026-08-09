@@ -7,13 +7,14 @@ import struct
 import pytest
 
 from seedlink_client.protocol import (
-    HEADSIZE_V3,
-    HEADSIZE_V4,
     MAX_PAYLOAD_SIZE,
+    MAX_STATIONID,
     Protocol,
     SeedLinkError,
+    SeedLinkPacket,
     StreamEvent,
     classify_stream_prefix,
+    is_packet_signature,
     parse_header_v3,
     parse_header_v4,
     parse_hello,
@@ -76,6 +77,10 @@ class TestParseHeaderV4:
         with pytest.raises(SeedLinkError):
             parse_header_v4(self._build(length=MAX_PAYLOAD_SIZE + 1))
 
+    def test_oversized_station_id_length_raises(self):
+        with pytest.raises(SeedLinkError):
+            parse_header_v4(self._build(sidlen=MAX_STATIONID + 1))
+
 
 class TestClassifyStreamPrefix:
     def test_v3_signature(self):
@@ -92,6 +97,47 @@ class TestClassifyStreamPrefix:
 
     def test_other(self):
         assert classify_stream_prefix(b"garbage") is StreamEvent.OTHER
+
+
+class TestIsPacketSignature:
+    def test_v3(self):
+        assert is_packet_signature(ord("S"), ord("L"))
+
+    def test_v4(self):
+        assert is_packet_signature(ord("S"), ord("E"))
+
+    def test_other(self):
+        assert not is_packet_signature(ord("E"), ord("N"))
+
+
+class TestSeedLinkPacketIsInfo:
+    def test_v3_xml_info(self):
+        pkt = SeedLinkPacket(station_id="", seqnum=None, payload_format="X",
+                              payload_subformat="I", payload=b"")
+        assert pkt.is_info
+
+    def test_v4_json_info(self):
+        pkt = SeedLinkPacket(station_id="IU_KONO", seqnum=1, payload_format="J",
+                              payload_subformat="I", payload=b"{}")
+        assert pkt.is_info
+
+    def test_v4_json_error(self):
+        pkt = SeedLinkPacket(station_id="", seqnum=1, payload_format="J",
+                              payload_subformat="E", payload=b"{}")
+        assert pkt.is_info
+
+    def test_mseed_event_detection_is_not_info(self):
+        # format '2' + subformat 'E' (miniSEED 2 event detection) collides
+        # with SUBFORMAT_JSON_ERROR's 'E' on subformat alone -- is_info must
+        # also check payload_format to tell them apart.
+        pkt = SeedLinkPacket(station_id="IU_KONO", seqnum=1, payload_format="2",
+                              payload_subformat="E", payload=b"")
+        assert not pkt.is_info
+
+    def test_ordinary_data_is_not_info(self):
+        pkt = SeedLinkPacket(station_id="IU_KONO", seqnum=1, payload_format="2",
+                              payload_subformat="D", payload=b"")
+        assert not pkt.is_info
 
 
 class TestParseReply:

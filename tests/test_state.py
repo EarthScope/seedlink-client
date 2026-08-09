@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import os
+import stat
+
+import pytest
+
 from seedlink_client.state import load_state, save_state
 from seedlink_client.streams import Stream
 
@@ -16,6 +21,22 @@ class TestSaveState:
             "II_BFO 11646353 2025-12-07T21:48:51.0445Z\n"
         )
 
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX file permissions only")
+    def test_permissions_follow_umask_not_mkstemp_default(self, tmp_path):
+        """mkstemp() itself creates the temp file mode 0600; save_state()
+        must widen that to ordinary umask-derived permissions before the
+        rename, like a plain open(), so another process/user can read a
+        state file meant to be shared (e.g. a monitoring tool)."""
+        path = tmp_path / "state.txt"
+        original_umask = os.umask(0o022)
+        os.umask(original_umask)  # umask() sets while returning the old value
+        try:
+            save_state(str(path), [Stream(station_id="IU_COLA", seqnum=5)])
+            mode = stat.S_IMODE(path.stat().st_mode)
+            assert mode == 0o666 & ~original_umask
+        finally:
+            os.umask(original_umask)
+
     def test_unset_sequence(self, tmp_path):
         path = tmp_path / "state.txt"
         save_state(str(path), [Stream(station_id="XX_NONE")])
@@ -27,9 +48,9 @@ class TestSaveState:
         assert path.read_text().splitlines()[1] == "IU_COLA 5"
 
     def test_deferred_timestamp_resolved_on_save(self, tmp_path):
-        """A stream whose timestamp hasn't been read yet (set from a live
-        packet during collect(), see Stream._get_timestamp) still resolves
-        and saves correctly."""
+        """A stream whose timestamp hasn't been resolved yet (set from a
+        live packet during collect(), see Stream.resolve_timestamp) still
+        resolves and saves correctly."""
 
         class _FakePacket:
             def record(self):
@@ -40,7 +61,7 @@ class TestSaveState:
 
         path = tmp_path / "state.txt"
         stream = Stream(station_id="IU_COLA", seqnum=5)
-        stream._ts_pkt = _FakePacket()
+        stream.pending_packet = _FakePacket()
         save_state(str(path), [stream])
         assert path.read_text().splitlines()[1] == "IU_COLA 5 2025-12-07T21:48:51.0445Z"
 

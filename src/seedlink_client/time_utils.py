@@ -3,8 +3,6 @@
 import re
 from datetime import datetime, timezone
 
-_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
-
 
 def _normalize_timestring(timestring: str) -> str:
     """Zero-pad single-digit date/time fields for datetime.fromisoformat().
@@ -45,10 +43,11 @@ def parse_timestring(timestring: str) -> datetime:
         An aware ``datetime`` in UTC.
     """
     if "," in timestring:
+        # year,month,day[,hour,minute,second]; missing fields default like
+        # an ISO date does -- month/day to 1, time fields to 0.
+        defaults = [None, 1, 1, 0, 0, 0]
         parts = [int(p) for p in timestring.strip().split(",")]
-        parts += [1, 1, 0, 0, 0][len(parts) - 1 :] if len(parts) < 3 else []
-        while len(parts) < 6:
-            parts.append(0)
+        parts += defaults[len(parts):]
         year, month, day, hour, minute, second = parts[:6]
         return datetime(year, month, day, hour, minute, second, tzinfo=timezone.utc)
     normalized = _normalize_timestring(timestring)
@@ -58,13 +57,28 @@ def parse_timestring(timestring: str) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
+def _as_utc(dt: datetime) -> datetime:
+    """Convert to UTC, treating a naive datetime as already being UTC.
+
+    ``datetime.astimezone()`` on its own assumes a naive datetime is in the
+    *local* zone, which would make a caller's naive datetime mean something
+    different depending on where the process happens to run -- everywhere
+    else in this module (:func:`parse_timestring`, and the whole SeedLink
+    wire protocol) treats a timezone-less time as UTC, so this does too.
+    """
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def to_iso_timestring(dt: datetime) -> str:
     """Format a datetime as a v4 ISO 8601 SeedLink time string.
 
     Format: ``YYYY-MM-DDThh:mm:ss[.ffffff]Z``. Fractional seconds are
-    omitted when zero, matching the examples in the v4 protocol spec.
+    omitted when zero, matching the examples in the v4 protocol spec. A
+    naive ``dt`` is treated as UTC.
     """
-    dt = dt.astimezone(timezone.utc)
+    dt = _as_utc(dt)
     if dt.microsecond:
         return dt.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
     return dt.strftime("%Y-%m-%dT%H:%M:%S") + "Z"
@@ -74,7 +88,8 @@ def to_comma_timestring(dt: datetime) -> str:
     """Format a datetime as a v3 comma-delimited SeedLink time string.
 
     Format: ``year,month,day,hour,minute,second``. Fractional seconds are
-    not representable in v3 and are truncated.
+    not representable in v3 and are truncated. A naive ``dt`` is treated
+    as UTC.
     """
-    dt = dt.astimezone(timezone.utc)
+    dt = _as_utc(dt)
     return f"{dt.year},{dt.month},{dt.day},{dt.hour},{dt.minute},{dt.second}"

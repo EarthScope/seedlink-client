@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from seedlink_client._commands import plan_handshake, plan_negotiation
+from seedlink_client._commands import NegotiationWalk, plan_handshake, plan_negotiation
 from seedlink_client.protocol import Protocol, SeedLinkError
 from seedlink_client.streams import Stream
 
@@ -82,6 +82,74 @@ class TestSelectorAutoUpgrade:
         select_cmd = next(c for c in cmds if c.role == "select")
         assert select_cmd.text == "SELECT BHZ"
 
+    def test_v4_only_selector_passed_through_unconverted_for_v3(self):
+        """A v4 selector with no v3 equivalent (multi-character subsource)
+        is sent as-is rather than dropped -- see v4_to_v3_selector's
+        docstring and _wire_selector."""
+        streams = [Stream(station_id="IU_KONO", selectors=["B_H_ZZ"])]
+        cmds = plan_negotiation(Protocol.V3, streams, dialup=False, multistation=True,
+                                 resume=True, lastpkttime=True, batch_active=False)
+        select_cmd = next(c for c in cmds if c.role == "select")
+        assert select_cmd.text == "SELECT B_H_ZZ"
+
+
+class TestNegotiationWalk:
+    """The shared per-command bookkeeping both transports' negotiate() loops
+    drive; see client.SeedLink.negotiate() for how it's used."""
+
+    def test_rejected_select_logged_with_consequence(self, caplog):
+        from seedlink_client.protocol import SeedLinkResponse
+
+        walk = NegotiationWalk()
+        cmd = next(c for c in plan_negotiation(
+            Protocol.V3, [Stream(station_id="IU_KONO", selectors=["B_H_ZZ"])],
+            dialup=False, multistation=True, resume=True, lastpkttime=True, batch_active=False,
+        ) if c.role == "select")
+        with caplog.at_level("WARNING"):
+            walk.record(cmd, SeedLinkResponse(status="ERROR", code=None, message="bad selector"))
+        assert "stays subscribed without this filter" in caplog.text
+
+    def test_rejected_station_skips_dependents(self):
+        walk = NegotiationWalk()
+        from seedlink_client._commands import data_v3, select_v3, station_v3
+        from seedlink_client.protocol import SeedLinkResponse
+
+        station_cmd = station_v3("IU_KONO", expect_reply=True)
+        assert walk.should_send(station_cmd)
+        walk.record(station_cmd, SeedLinkResponse(status="ERROR", code=None, message="no such station"))
+
+        select_cmd = select_v3("IU_KONO", "BHZ", expect_reply=True)
+        assert not walk.should_send(select_cmd)
+        data_cmd = data_v3("IU_KONO", "DATA", None, None, expect_reply=True)
+        assert not walk.should_send(data_cmd)
+
+    def test_rejected_data_logged_with_command_name(self, caplog):
+        """The log message names the actual command sent (DATA/FETCH/TIME),
+        not the generic "data" role used for routing."""
+        from seedlink_client._commands import data_v3
+        from seedlink_client.protocol import SeedLinkResponse
+
+        walk = NegotiationWalk()
+        cmd = data_v3("IU_KONO", "FETCH", None, None, expect_reply=True)
+        with caplog.at_level("WARNING"):
+            walk.record(cmd, SeedLinkResponse(status="ERROR", code=None, message="denied"))
+        assert "FETCH rejected for IU_KONO" in caplog.text
+
+    def test_finish_raises_if_no_station_accepted(self):
+        walk = NegotiationWalk()
+        from seedlink_client._commands import station_v3
+        from seedlink_client.protocol import SeedLinkResponse
+
+        cmd = station_v3("IU_KONO", expect_reply=True)
+        walk.should_send(cmd)
+        walk.record(cmd, SeedLinkResponse(status="ERROR", code=None, message="rejected"))
+        with pytest.raises(SeedLinkError, match="No stations accepted"):
+            walk.finish()
+
+    def test_finish_ok_if_no_station_role_seen(self):
+        """v3 uni-station negotiation has no STATION command at all."""
+        NegotiationWalk().finish()  # must not raise
+
 
 class TestPlanNegotiationV4:
     def test_station_select_data_end(self):
@@ -122,7 +190,9 @@ class TestPlanNegotiationV4:
                                  resume=True, lastpkttime=True, batch_active=False)
         assert cmds[-1].text == "ENDFETCH"
 
-    def test_time_window_with_seqnum(self):
+    def test_time_window_overrides_seqnum(self):
+        # A set time window always overrides sequence resumption, matching
+        # v3's TIME-vs-DATA/FETCH choice -- see test_time_window_without_seqnum_requests_all.
         streams = [Stream(station_id="IU_KONO", seqnum=100)]
         start = datetime(2024, 1, 1, tzinfo=timezone.utc)
         end = datetime(2024, 1, 2, tzinfo=timezone.utc)
@@ -130,7 +200,7 @@ class TestPlanNegotiationV4:
                                  resume=True, lastpkttime=True, batch_active=False,
                                  start_time=start, end_time=end)
         data_cmd = next(c for c in cmds if c.role == "data")
-        assert data_cmd.text == "DATA 101 2024-01-01T00:00:00Z 2024-01-02T00:00:00Z"
+        assert data_cmd.text == "DATA ALL 2024-01-01T00:00:00Z 2024-01-02T00:00:00Z"
 
     def test_time_window_without_seqnum_requests_all(self):
         streams = [Stream(station_id="IU_KONO")]
@@ -179,6 +249,25 @@ class TestPlanNegotiationV3Multi:
                                  resume=True, lastpkttime=True, batch_active=False)
         data_cmd = next(c for c in cmds if c.role == "data")
         assert data_cmd.text == "FETCH"
+
+    def test_resume_includes_last_packet_timestamp(self):
+        streams = [Stream(station_id="IU_KONO", seqnum=100, timestamp="2024-01-01T00:00:00Z")]
+        cmds = plan_negotiation(Protocol.V3, streams, dialup=False, multistation=True,
+                                 resume=True, lastpkttime=True, batch_active=False)
+        data_cmd = next(c for c in cmds if c.role == "data")
+        assert data_cmd.text == "DATA 65 2024,1,1,0,0,0"
+
+    def test_malformed_saved_timestamp_is_dropped_not_fatal(self, caplog):
+        # A hand-edited or truncated state file's timestamp field must not
+        # abort negotiation with a bare ValueError -- resume by sequence
+        # number alone instead.
+        streams = [Stream(station_id="IU_KONO", seqnum=100, timestamp="not-a-timestamp")]
+        with caplog.at_level("WARNING"):
+            cmds = plan_negotiation(Protocol.V3, streams, dialup=False, multistation=True,
+                                     resume=True, lastpkttime=True, batch_active=False)
+        data_cmd = next(c for c in cmds if c.role == "data")
+        assert data_cmd.text == "DATA 65"
+        assert "IU_KONO" in caplog.text
 
     def test_time_window_uses_time_command(self):
         streams = [Stream(station_id="IU_KONO", seqnum=100)]
@@ -229,10 +318,20 @@ class TestPlanNegotiationV3Uni:
         data_cmd = cmds[-1]
         assert data_cmd.parse is None
 
-    def test_select_always_expects_reply_regardless_of_batch(self):
+    def test_select_expects_no_reply_while_batched(self):
+        # A batched v3 server suppresses OK/ERROR for SELECT same as it does
+        # in multi-station mode; expecting one here would hang forever
+        # waiting for a reply line the server never sends.
         streams = [Stream(station_id="*", selectors=["BHZ"])]
         cmds = plan_negotiation(Protocol.V3, streams, dialup=False, multistation=False,
                                  resume=True, lastpkttime=True, batch_active=True)
+        select_cmd = next(c for c in cmds if c.role == "select")
+        assert select_cmd.parse is None
+
+    def test_select_expects_reply_when_not_batched(self):
+        streams = [Stream(station_id="*", selectors=["BHZ"])]
+        cmds = plan_negotiation(Protocol.V3, streams, dialup=False, multistation=False,
+                                 resume=True, lastpkttime=True, batch_active=False)
         select_cmd = next(c for c in cmds if c.role == "select")
         assert select_cmd.parse is not None
 

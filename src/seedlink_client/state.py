@@ -26,18 +26,28 @@ def save_state(path: str, streams: list[Stream]) -> None:
 
     Written via a temporary file in the same directory, then renamed into
     place, so a crash or interrupt mid-write can't leave a truncated state
-    file behind.
+    file behind. ``mkstemp()`` creates that temp file mode 0600 (owner
+    read/write only); it's given ordinary umask-derived permissions before
+    the rename, matching a plain ``open()``, since a state file is often
+    meant to be read by another process or user (e.g. a monitoring tool,
+    or a different service account resuming the same stream).
     """
     directory = os.path.dirname(path) or "."
     fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".tmp-", suffix=".state")
     try:
+        # os.umask() only sets while returning the old value, so reading it
+        # means setting-then-restoring; there's no separate "get" call.
+        umask = os.umask(0)
+        os.umask(umask)
+        os.chmod(tmp_path, 0o666 & ~umask)
         with os.fdopen(fd, "w") as f:
             f.write(_HEADER_V2 + "\n")
             for stream in streams:
                 seq = "UNSET" if stream.seqnum is None else str(stream.seqnum)
                 fields = [stream.station_id, seq]
-                if stream.timestamp:
-                    fields.append(stream.timestamp)
+                timestamp = stream.resolve_timestamp()
+                if timestamp:
+                    fields.append(timestamp)
                 f.write(" ".join(fields) + "\n")
         os.replace(tmp_path, path)
     except BaseException:

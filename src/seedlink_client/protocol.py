@@ -5,7 +5,10 @@ verbatim by both the synchronous :class:`~seedlink_client.client.SeedLink`
 and the asyncio-based :class:`~seedlink_client.aio.AsyncSeedLink`. Each
 transport is responsible only for getting bytes on and off the wire; every
 decision about what those bytes *mean* — v3 vs v4 framing, reply shape,
-protocol negotiation — is made here.
+protocol negotiation — is made here, including the parts of frame
+decoding and line scanning that don't themselves need to read from a
+socket (:func:`decode_frame_v3`, :func:`decode_frame_v4_body`,
+:func:`scan_line`).
 
 SeedLink v3 and v4 use unrelated packet framings, so this module speaks
 both: v3's 8-byte ``"SL"`` + 6-hex-digit sequence header (record length is
@@ -42,7 +45,13 @@ _V4_HEADER_STRUCT = struct.Struct("<2sccIQB")
 MIN_PAYLOAD_DETECT = 64
 
 MAX_STATIONID = 21   # usable station ID length (libslink reserves 1 for NUL)
-MAX_COMMAND_LEN = 255  # max command line length per the v4 spec, incl. CRLF
+
+# Bounded ceiling on a sent command line. The v4 spec states 255 bytes
+# including CRLF, but a real AUTH JWT token routinely exceeds that, and
+# servers in practice (e.g. ringserver) accept far longer lines -- so this
+# is a deliberate, generous send-side cap rather than a literal reading of
+# the spec limit.
+MAX_COMMAND_LEN = 4096
 
 # Sanity cap on a buffered reply/HELLO line with no terminator in sight yet.
 # Generous relative to MAX_COMMAND_LEN (which bounds what we send, not what a
@@ -52,19 +61,20 @@ MAX_LINE_LEN = 8192
 
 # Sanity cap on a v4 header's declared payload length. A corrupt or
 # malicious header could otherwise claim an enormous size and force the
-# reader to allocate/wait for a buffer far beyond any real SeedLink payload.
-MAX_PAYLOAD_SIZE = 256 * 1024 * 1024
+# reader to allocate/wait for a buffer far beyond any real SeedLink
+# payload; a few MiB is still generous headroom for a real
+# miniSEED/JSON/XML packet.
+MAX_PAYLOAD_SIZE = 16 * 1024 * 1024
 
 # Sanity cap on how far to search for a v3 packet's miniSEED record length
-# (protocol.py's MIN_PAYLOAD_DETECT is the minimum; this is the maximum). No
-# real SeedLink record exceeds a few hundred KiB; capping the detection
-# window keeps a corrupt v3 stream from growing the receive buffer toward
+# (MIN_PAYLOAD_DETECT above is the minimum; this is the maximum). No real
+# SeedLink record exceeds a few hundred KiB; capping the detection window
+# keeps a corrupt v3 stream from growing the receive buffer toward
 # MAX_PAYLOAD_SIZE just to conclude it isn't miniSEED.
 MAX_RECORD_LEN = 1024 * 1024
 
 # miniSEED/JSON/XML payload format codes (the literal v4 wire byte)
 FORMAT_MSEED2 = "2"
-FORMAT_MSEED3 = "3"
 FORMAT_JSON = "J"
 FORMAT_XML = "X"
 SUBFORMAT_JSON_INFO = "I"
@@ -161,8 +171,17 @@ class SeedLinkPacket:
 
     @property
     def is_info(self) -> bool:
-        """Whether this packet carries an INFO reply rather than data."""
-        return self.payload_subformat in (SUBFORMAT_JSON_INFO, SUBFORMAT_JSON_ERROR)
+        """Whether this packet carries an INFO reply rather than data.
+
+        Checks payload_format too, not just payload_subformat -- a miniSEED
+        event-detection/calibration/log packet's subformat code happens to
+        collide with SUBFORMAT_JSON_ERROR ('E') otherwise.
+        """
+        if self.payload_format == FORMAT_XML:
+            return True
+        return self.payload_format == FORMAT_JSON and self.payload_subformat in (
+            SUBFORMAT_JSON_INFO, SUBFORMAT_JSON_ERROR,
+        )
 
     def record(self):
         """Parse the payload as a miniSEED record, via :mod:`pymseed`.
@@ -180,7 +199,7 @@ class SeedLinkPacket:
         return self._record
 
 
-@dataclass
+@dataclass(slots=True)
 class HeaderV3:
     """Parsed v3 packet header (8 bytes: 'SL' + 6 hex digits, or 'SLINFO')."""
 
@@ -198,6 +217,23 @@ class HeaderV4:
     payload_length: int
     seqnum: int
     station_id_length: int
+
+
+@dataclass(slots=True)
+class _RawFrame:
+    """One decoded packet frame, before being wrapped as a public SeedLinkPacket.
+
+    ``info_continues`` is only meaningful for a v3 SLINFO packet -- whether
+    more INFO packets follow this one.
+    """
+
+    station_id: str
+    seqnum: int | None
+    payload_format: str
+    payload_subformat: str
+    payload: bytes
+    info_continues: bool
+    record: Any = None  # pre-parsed pymseed record, if already known
 
 
 def parse_header_v3(buf: bytes) -> HeaderV3:
@@ -234,6 +270,10 @@ def parse_header_v4(buf: bytes) -> HeaderV4:
         raise SeedLinkError(
             f"Declared payload length {length} exceeds sanity limit {MAX_PAYLOAD_SIZE}"
         )
+    if sidlen > MAX_STATIONID:
+        raise SeedLinkError(
+            f"Declared station ID length {sidlen} exceeds sanity limit {MAX_STATIONID}"
+        )
     return HeaderV4(
         payload_format=fmt.decode("ascii"),
         payload_subformat=subfmt.decode("ascii"),
@@ -241,6 +281,66 @@ def parse_header_v4(buf: bytes) -> HeaderV4:
         seqnum=seqnum,
         station_id_length=sidlen,
     )
+
+
+def decode_frame_v3(header: HeaderV3, payload: bytes) -> _RawFrame:
+    """Build a _RawFrame from a v3 header and its already-read miniSEED payload.
+
+    Pure aside from a lazy :mod:`~seedlink_client.mseed` import, matching
+    :meth:`SeedLinkPacket.record`'s -- :mod:`mseed` imports from this
+    module, so the import happens at call time to avoid a cycle.
+    """
+    from . import mseed
+
+    if header.is_info:
+        text = mseed.extract_info_text(payload)
+        return _RawFrame(
+            station_id="", seqnum=None, payload_format=FORMAT_XML,
+            payload_subformat=SUBFORMAT_JSON_INFO, payload=text.encode("utf-8"),
+            info_continues=header.info_continues,
+        )
+    record = mseed.parse_record(payload)
+    return _RawFrame(
+        station_id=mseed.station_id(record), seqnum=header.seqnum,
+        payload_format=FORMAT_MSEED2, payload_subformat="D", payload=payload,
+        info_continues=False, record=record,
+    )
+
+
+def decode_frame_v4_body(view: Any, start: int, header: HeaderV4) -> _RawFrame:
+    """Build a _RawFrame from a v4 header and the buffer holding its station
+    ID and payload, once the transport has ensured all of it is present.
+
+    ``view`` may be a ``memoryview``, ``bytes``, or ``bytearray``; ``start``
+    is the header's own start offset (the station ID follows immediately
+    after ``HEADSIZE_V4`` bytes).
+    """
+    pos = start + HEADSIZE_V4
+    if header.station_id_length:
+        station_id = bytes(view[pos:pos + header.station_id_length]).decode("ascii")
+        pos += header.station_id_length
+    else:
+        station_id = ""
+    payload = bytes(view[pos:pos + header.payload_length])
+    return _RawFrame(
+        station_id=station_id, seqnum=header.seqnum,
+        payload_format=header.payload_format, payload_subformat=header.payload_subformat,
+        payload=payload, info_continues=False,
+    )
+
+
+# First-byte values of a v3/v4 packet signature ('S' + 'L' or 'E'), for
+# is_packet_signature() -- checked directly against the receive buffer so
+# the steady state of packet-after-packet streaming never allocates a
+# bytes object just to classify the next two bytes.
+_ORD_S = ord("S")
+_ORD_L = ord("L")
+_ORD_E = ord("E")
+
+
+def is_packet_signature(first: int, second: int) -> bool:
+    """Whether two buffered byte values open a v3 ('SL') or v4 ('SE') packet."""
+    return first == _ORD_S and second in (_ORD_L, _ORD_E)
 
 
 def classify_stream_prefix(buf: bytes) -> StreamEvent:
@@ -258,6 +358,31 @@ def classify_stream_prefix(buf: bytes) -> StreamEvent:
     if buf.startswith(SIGNATURE_V3) or buf.startswith(SIGNATURE_V4):
         return StreamEvent.PACKET
     return StreamEvent.OTHER
+
+
+def scan_line(buf: Any, start: int, end: int, search_from: int) -> tuple[str, int] | None:
+    """Scan ``buf[start + search_from:end]`` for a CRLF-terminated line.
+
+    Shared by both transports' ``_read_line()``: each keeps its own
+    ``search_from`` across fills (so a line spanning several reads is not
+    rescanned from the start every time) and calls this again after each
+    one. Returns ``(line_text, new_start)`` once a full line is found, or
+    None if more bytes are needed.
+
+    Raises:
+        SeedLinkError: if the pending line already exceeds MAX_LINE_LEN
+            with no terminator, or if a found line is not ASCII.
+    """
+    idx = buf.find(b"\r\n", start + search_from, end)
+    if idx < 0:
+        if end - start >= MAX_LINE_LEN:
+            raise SeedLinkError(f"Reply line exceeds {MAX_LINE_LEN} bytes with no terminator")
+        return None
+    line = bytes(buf[start:idx])
+    try:
+        return line.decode("ascii"), idx + 2
+    except UnicodeDecodeError as e:
+        raise SeedLinkError(f"Reply is not ASCII: {line!r}") from e
 
 
 def parse_reply(text: str) -> SeedLinkResponse:
@@ -383,8 +508,9 @@ def generate_client_id(program_name: str | None = None) -> tuple[str, str]:
         import sys
 
         main_module = sys.modules.get("__main__")
-        if main_module is not None and hasattr(main_module, "__file__"):
-            program_name = os.path.basename(main_module.__file__)
+        program_name = getattr(main_module, "__file__", None)
+        if program_name:
+            program_name = os.path.basename(program_name)
         else:
             program_name = "seedlink-client"
     from . import __version__

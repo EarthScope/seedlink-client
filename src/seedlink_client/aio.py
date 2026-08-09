@@ -11,8 +11,10 @@ to check the keepalive/idle-timeout clocks -- an expected, non-fatal
 ``TimeoutError`` that never touches the connection, since it only ever
 fires between frames, never mid-frame -- and every public method's body is
 wrapped so that a genuine external ``CancelledError`` (the caller cancelling
-the whole call) closes the connection before propagating, since a
-cancelled read cannot be resumed mid-frame.
+the whole call) or ``GeneratorExit`` (breaking out of :meth:`collect`'s
+``async for`` early, or the generator being garbage collected) closes the
+connection before propagating, since a cancelled read cannot be resumed
+mid-frame.
 """
 
 from __future__ import annotations
@@ -28,17 +30,14 @@ from typing import Any
 from . import _commands, mseed
 from ._base import _SeedLinkBase
 from ._commands import Command
-from .client import _RawFrame
 from .protocol import (
     FORMAT_JSON,
     FORMAT_XML,
     HEADSIZE_V3,
     HEADSIZE_V4,
     MAX_COMMAND_LEN,
-    MAX_LINE_LEN,
     MAX_RECORD_LEN,
     MIN_PAYLOAD_DETECT,
-    SUBFORMAT_JSON_INFO,
     Protocol,
     SeedLinkAuthError,
     SeedLinkError,
@@ -46,64 +45,38 @@ from .protocol import (
     SeedLinkResponse,
     SeedLinkTimeout,
     StreamEvent,
+    _RawFrame,
     classify_stream_prefix,
+    decode_frame_v3,
+    decode_frame_v4_body,
+    is_packet_signature,
     parse_header_v3,
     parse_header_v4,
     parse_info_xml,
     parse_reply,
+    scan_line,
     select_protocol,
 )
-from .streams import Stream, sort_streams
+from .streams import sort_streams
 
 logger = logging.getLogger(__name__)
 
-_RECV_BUF_SIZE = 65536
 _POLL_INTERVAL = 1.0
-
-# First-byte values of a v3/v4 packet signature ('S' + 'L' or 'E'), checked
-# directly against the receive buffer in _classify_next() so the steady
-# state of packet-after-packet streaming never allocates a bytes object.
-_ORD_S = ord("S")
-_ORD_L = ord("L")
-_ORD_E = ord("E")
 
 
 class AsyncSeedLink(_SeedLinkBase):
     """Asyncio SeedLink client, offering the same API as :class:`~seedlink_client.client.SeedLink`.
 
-    See :class:`~seedlink_client.client.SeedLink` for the full argument and
-    attribute documentation, identical here.
+    See :meth:`_SeedLinkBase.__init__` for the full argument and attribute
+    documentation, identical here -- except ``timeout``: the sync client
+    applies it per socket operation, this class applies it as a single
+    deadline across an entire :meth:`connect`/:meth:`negotiate`/:meth:`info`
+    call (see :meth:`_timeout_scope`).
     """
 
-    def __init__(
-        self,
-        host: str = "localhost",
-        port: int = 18000,
-        timeout: float | None = None,
-        tls: bool | None = None,
-        tls_noverify: bool = False,
-        protocol: Protocol | None = None,
-        keepalive: float | None = None,
-        idle_timeout: float = 600.0,
-        reconnect_delay: float = 30.0,
-        dialup: bool = False,
-        batch: bool = False,
-        clientname: str | None = None,
-        clientversion: str | None = None,
-        auth: tuple[str, str] | str | None = None,
-    ):
-        super().__init__(
-            host, port, timeout=timeout, tls=tls, tls_noverify=tls_noverify,
-            protocol=protocol, keepalive=keepalive, idle_timeout=idle_timeout,
-            reconnect_delay=reconnect_delay, dialup=dialup, batch=batch,
-            clientname=clientname, clientversion=clientversion, auth=auth,
-        )
+    def _init_transport(self) -> None:
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
-        self._recv_buf = bytearray(_RECV_BUF_SIZE)
-        self._recv_view = memoryview(self._recv_buf)
-        self._recv_start = 0
-        self._recv_end = 0
 
     @property
     def is_connected(self) -> bool:
@@ -152,36 +125,62 @@ class AsyncSeedLink(_SeedLinkBase):
         self._reset_recv_buf()
         logger.debug("Connected to %s:%d%s", self._host, self._port, " (TLS)" if self._tls else "")
 
-    async def _do_hello(self) -> None:
+    async def _do_hello(self, promote_protocol: bool = True) -> None:
+        """Send HELLO and store the server's identity.
+
+        promote_protocol decides the negotiated version locally, but that's
+        only real once SLPROTO has actually been sent and acknowledged (see
+        plan_handshake()); callers driving the handshake by hand pass False
+        and upgrade explicitly instead.
+        """
         await self._send_command(_commands.hello())
         line1 = await self._read_line()
         line2 = await self._read_line()
+        logger.debug("<-- %s", line1)
+        logger.debug("<-- %s", line2)
         self._store_identity(line1, line2)
-        self.protocol = select_protocol(self._server_protocol_majors, self._requested_protocol)
+        if promote_protocol:
+            self.protocol = select_protocol(self._server_protocol_majors, self._requested_protocol)
 
-    async def connect(self) -> None:
-        """Open the connection: TCP/TLS, HELLO, and protocol handshake."""
+    async def connect(self, handshake: bool = True) -> None:
+        """Open the connection: TCP/TLS, and by default HELLO plus the
+        protocol handshake.
+
+        Args:
+            handshake: If False, only open the TCP/TLS socket -- skip HELLO
+                and the post-HELLO handshake (SLPROTO/USERAGENT/AUTH/
+                CAPABILITIES/BATCH), for driving the raw protocol by hand.
+
+        Raises:
+            SeedLinkError: if already connected (the existing connection is
+                left untouched -- only ``_do_hello()``/handshake failures
+                past this point close it), or on any other handshake
+                failure.
+        """
         try:
             async with self._timeout_scope():
                 await self._connect_socket()
-                await self._do_hello()
-                handshake = _commands.plan_handshake(
-                    self.protocol, self.server_capabilities, self._clientname,
-                    self._clientversion, self._auth, self._want_batch,
-                )
-                for cmd in handshake:
-                    resp = await self._send_command(cmd)
-                    if cmd.text == "BATCH":
-                        self._batch_active = bool(resp)
+                if not handshake:
+                    return
+                try:
+                    await self._do_hello()
+                    handshake_cmds = _commands.plan_handshake(
+                        self.protocol, self.server_capabilities, self._clientname,
+                        self._clientversion, self._auth, self._want_batch,
+                    )
+                    for cmd in handshake_cmds:
+                        resp = await self._send_command(cmd)
+                        if cmd.text == "BATCH":
+                            self._batch_active = bool(resp)
+                except SeedLinkError:
+                    await self.close()
+                    raise
         except asyncio.CancelledError:
             await self.close()
             raise
         except TimeoutError as e:
             await self.close()
             raise SeedLinkTimeout(f"Timed out connecting to {self._host}:{self._port}") from e
-        except SeedLinkError:
-            await self.close()
-            raise
 
     async def close(self) -> None:
         """Gracefully close the connection.
@@ -210,16 +209,23 @@ class AsyncSeedLink(_SeedLinkBase):
         if self._streams:
             await self.negotiate()
 
-    async def ping(self) -> tuple[str, str]:
-        """Connect, HELLO, report identity, and disconnect. No stream setup."""
+    async def ping(self) -> tuple[str | None, str | None]:
+        """Connect, HELLO, report identity, and disconnect. No stream setup.
+
+        Raises:
+            SeedLinkError: if already connected -- the existing connection
+                is left untouched.
+        """
         try:
             async with self._timeout_scope():
                 await self._connect_socket()
-                await self._do_hello()
+                try:
+                    await self._do_hello()
+                finally:
+                    await self.close()
         except TimeoutError as e:
-            raise SeedLinkTimeout(f"Timed out pinging {self._host}:{self._port}") from e
-        finally:
             await self.close()
+            raise SeedLinkTimeout(f"Timed out pinging {self._host}:{self._port}") from e
         return self.server_id, self.organization
 
     async def bye(self) -> None:
@@ -233,13 +239,6 @@ class AsyncSeedLink(_SeedLinkBase):
 
     # -- Byte-level transport ----------------------------------------------
 
-    def _reset_recv_buf(self) -> None:
-        if len(self._recv_buf) > _RECV_BUF_SIZE:
-            self._recv_buf = bytearray(_RECV_BUF_SIZE)
-            self._recv_view = memoryview(self._recv_buf)
-        self._recv_start = 0
-        self._recv_end = 0
-
     async def _ensure(self, n: int) -> None:
         """Ensure at least n bytes are buffered, filling from the socket as needed.
 
@@ -251,25 +250,8 @@ class AsyncSeedLink(_SeedLinkBase):
         """
         if self._reader is None:
             raise SeedLinkError("Not connected")
-        available = self._recv_end - self._recv_start
-        if available >= n:
+        if self._prepare_room(n):
             return
-        if available == 0 and n <= _RECV_BUF_SIZE:
-            self._reset_recv_buf()
-        if n > len(self._recv_buf):
-            new_size = max(n, len(self._recv_buf) * 2)
-            new_buf = bytearray(new_size)
-            if available > 0:
-                new_buf[:available] = self._recv_buf[self._recv_start:self._recv_end]
-            self._recv_buf = new_buf
-            self._recv_view = memoryview(self._recv_buf)
-            self._recv_start = 0
-            self._recv_end = available
-        elif len(self._recv_buf) - self._recv_start < n:
-            if available > 0:
-                self._recv_buf[:available] = self._recv_buf[self._recv_start:self._recv_end]
-            self._recv_start = 0
-            self._recv_end = available
         while self._recv_end - self._recv_start < n:
             try:
                 chunk = await self._reader.read(len(self._recv_buf) - self._recv_end)
@@ -293,28 +275,19 @@ class AsyncSeedLink(_SeedLinkBase):
         return data
 
     async def _read_line(self) -> str:
-        """Read up through the next b'\\r\\n', returning the text before it.
-
-        Searches the buffer in place (no copy) each pass, resuming from
-        where the previous pass left off, and gives up once the pending
-        line exceeds ``MAX_LINE_LEN`` -- otherwise a peer that never sends
-        a terminator would grow the receive buffer without bound.
-        """
+        """Read up through the next b'\\r\\n', returning the text before it."""
         search_from = 0
         while True:
-            available = self._recv_end - self._recv_start
-            idx = self._recv_buf.find(b"\r\n", self._recv_start + search_from, self._recv_end)
-            if idx >= 0:
-                line = bytes(self._recv_buf[self._recv_start:idx])
-                self._recv_start = idx + 2
-                try:
-                    return line.decode("ascii")
-                except UnicodeDecodeError as e:
-                    await self.close()
-                    raise SeedLinkError(f"Reply is not ASCII: {line!r}") from e
-            if available >= MAX_LINE_LEN:
+            try:
+                result = scan_line(self._recv_buf, self._recv_start, self._recv_end, search_from)
+            except SeedLinkError:
                 await self.close()
-                raise SeedLinkError(f"Reply line exceeds {MAX_LINE_LEN} bytes with no terminator")
+                raise
+            if result is not None:
+                line, new_start = result
+                self._recv_start = new_start
+                return line
+            available = self._recv_end - self._recv_start
             search_from = max(0, available - 1)
             await self._ensure(available + 1)
 
@@ -326,6 +299,7 @@ class AsyncSeedLink(_SeedLinkBase):
             raise SeedLinkError(
                 f"Command exceeds the {MAX_COMMAND_LEN}-byte command-line limit: {cmd.text!r}"
             )
+        logger.debug("--> %s", cmd.text)
         try:
             self._writer.write(wire)
             await self._writer.drain()
@@ -334,7 +308,9 @@ class AsyncSeedLink(_SeedLinkBase):
             raise SeedLinkError(f"send failed: {e}") from e
         if cmd.parse is None:
             return None
-        return cmd.parse(await self._read_line())
+        line = await self._read_line()
+        logger.debug("<-- %s", line)
+        return cmd.parse(line)
 
     # -- Packet framing -----------------------------------------------------
 
@@ -344,15 +320,15 @@ class AsyncSeedLink(_SeedLinkBase):
         5-byte peek."""
         await self._ensure(2)
         first, second = self._recv_buf[self._recv_start], self._recv_buf[self._recv_start + 1]
-        if first == _ORD_S and second in (_ORD_L, _ORD_E):
+        if is_packet_signature(first, second):
             return StreamEvent.PACKET  # steady state: 'SL'/'SE' packet signature
-        if first == _ORD_E:
+        if first == ord("E"):
             event = classify_stream_prefix(await self._peek(3))
             if event is StreamEvent.OTHER:
                 event = classify_stream_prefix(await self._peek(5))
             if event in (StreamEvent.END, StreamEvent.ERROR):
                 return event
-        prefix = bytes(self._recv_view[self._recv_start:self._recv_start + 1])
+        prefix = bytes(self._recv_view[self._recv_start:self._recv_start + 2])
         raise SeedLinkError(f"Unexpected data in stream: {prefix!r}")
 
     async def _read_mseed_payload(self) -> bytes:
@@ -369,19 +345,7 @@ class AsyncSeedLink(_SeedLinkBase):
     async def _recv_frame_v3(self) -> _RawFrame:
         header = parse_header_v3(await self._read_exact(HEADSIZE_V3))
         payload = await self._read_mseed_payload()
-        if header.is_info:
-            text = mseed.extract_info_text(payload)
-            return _RawFrame(
-                station_id="", seqnum=None, payload_format=FORMAT_XML,
-                payload_subformat=SUBFORMAT_JSON_INFO, payload=text.encode("utf-8"),
-                info_continues=header.info_continues,
-            )
-        record = mseed.parse_record(payload)
-        return _RawFrame(
-            station_id=mseed.station_id(record), seqnum=header.seqnum,
-            payload_format="2", payload_subformat="D", payload=payload,
-            info_continues=False, record=record,
-        )
+        return decode_frame_v3(header, payload)
 
     async def _recv_frame_v4(self) -> _RawFrame:
         # A single _ensure() for the whole frame, rather than one per field,
@@ -391,46 +355,32 @@ class AsyncSeedLink(_SeedLinkBase):
         header = parse_header_v4(self._recv_view[self._recv_start:self._recv_start + HEADSIZE_V4])
         total = HEADSIZE_V4 + header.station_id_length + header.payload_length
         await self._ensure(total)
-        pos = self._recv_start + HEADSIZE_V4
-        if header.station_id_length:
-            station_id = bytes(self._recv_view[pos:pos + header.station_id_length]).decode("ascii")
-            pos += header.station_id_length
-        else:
-            station_id = ""
-        payload = bytes(self._recv_view[pos:pos + header.payload_length])
+        frame = decode_frame_v4_body(self._recv_view, self._recv_start, header)
         self._recv_start += total
-        return _RawFrame(
-            station_id=station_id, seqnum=header.seqnum,
-            payload_format=header.payload_format, payload_subformat=header.payload_subformat,
-            payload=payload, info_continues=False,
-        )
+        return frame
 
     async def _recv_frame(self) -> _RawFrame | SeedLinkResponse | None:
         """Read one frame: a data/INFO packet, an ERROR reply, or None (dial-up END)."""
         event = await self._classify_next()
         if event is StreamEvent.END:
             await self._read_exact(3)
+            logger.debug("<-- END")
             result = None
         elif event is StreamEvent.ERROR:
-            result = parse_reply(await self._read_line())
+            line = await self._read_line()
+            logger.debug("<-- %s", line)
+            result = parse_reply(line)
         else:
             result = await self._recv_frame_v4() if self.protocol is Protocol.V4 else await self._recv_frame_v3()
+            logger.debug("<-- packet station=%s seq=%s format=%s%s (%d bytes)",
+                         result.station_id or "-", result.seqnum, result.payload_format,
+                         result.payload_subformat, len(result.payload))
         # A large payload's buffer would otherwise be pinned for the life of
         # the connection: _ensure() only shrinks it on entry with nothing
         # buffered, which a continuously busy connection may never reach.
         if self._recv_start == self._recv_end:
             self._reset_recv_buf()
         return result
-
-    def _to_packet(self, frame: _RawFrame) -> SeedLinkPacket:
-        pkt = SeedLinkPacket(
-            station_id=frame.station_id, seqnum=frame.seqnum,
-            payload_format=frame.payload_format, payload_subformat=frame.payload_subformat,
-            payload=frame.payload,
-        )
-        if frame.record is not None:
-            pkt._record = frame.record
-        return pkt
 
     # -- Negotiation ----------------------------------------------------------
 
@@ -448,43 +398,20 @@ class AsyncSeedLink(_SeedLinkBase):
 
     async def _negotiate(self) -> None:
         self._match_cache.clear()
-        if not self._streams:
-            self._streams = [Stream(station_id="*")]
+        self._ensure_default_stream()
         plan = _commands.plan_negotiation(
             self.protocol, sort_streams(self._streams), self._dialup, self._multistation,
             resume=True, lastpkttime=True, batch_active=self._batch_active,
             start_time=self._start_time, end_time=self._end_time,
         )
-        accepted_any_station = False
-        seen_station_role = False
-        skip_stream = False
+        walk = _commands.NegotiationWalk()
         for cmd in plan:
-            if cmd.role == "station":
-                seen_station_role = True
-                skip_stream = False
-            elif skip_stream and cmd.role in ("select", "data"):
+            if not walk.should_send(cmd):
                 continue
             resp = await self._send_command(cmd)
-            if cmd.role == "station":
-                if resp is not None and not resp:
-                    logger.warning("Station %s rejected: %s", cmd.stream_id, resp.message)
-                    skip_stream = True
-                    continue
-                accepted_any_station = True
-            elif cmd.role in ("select", "data") and resp is not None and not resp:
-                logger.warning("%s rejected for %s: %s", cmd.role, cmd.stream_id, resp.message)
-        if seen_station_role and not accepted_any_station:
-            raise SeedLinkError("No stations accepted")
+            walk.record(cmd, resp)
+        walk.finish()
         self._streaming = True
-
-    def _update_stream_state(self, pkt: SeedLinkPacket) -> None:
-        if pkt.seqnum is None:
-            return
-        for stream in self._streams_matching(pkt.station_id):
-            stream.seqnum = pkt.seqnum
-            # Deferred: the packet is only parsed for its start time if
-            # stream.timestamp is actually read (see Stream._get_timestamp).
-            stream._ts_pkt = pkt
 
     async def _reconnect_after_delay(self) -> None:
         await asyncio.sleep(self._reconnect_delay)
@@ -509,7 +436,9 @@ class AsyncSeedLink(_SeedLinkBase):
         wait for the next frame is polled with a short internal timeout to
         check the keepalive/idle-timeout clocks; that expected timeout
         never closes the connection, unlike a genuine external cancellation
-        of this generator itself, which does.
+        of this generator itself, which does -- as does breaking out of an
+        ``async for`` early, or the generator being garbage collected,
+        both of which arrive here as ``GeneratorExit``.
         """
         try:
             if not self._streaming:
@@ -525,6 +454,18 @@ class AsyncSeedLink(_SeedLinkBase):
                     next_keepalive = (time.monotonic() + self._keepalive) if self._keepalive else None
                     continue
 
+                # Checked every pass, not just on a poll timeout -- a server
+                # sending only INFO/keepalive replies (no real data) would
+                # otherwise keep _ensure(1) resolving immediately and this
+                # timeout would never get a chance to fire.
+                now = time.monotonic()
+                if now - last_data_time > self._idle_timeout:
+                    logger.warning("No data for over %.0fs, reconnecting", self._idle_timeout)
+                    await self.close()
+                    if not reconnect:
+                        raise SeedLinkTimeout(f"No data for over {self._idle_timeout:.0f}s")
+                    continue
+
                 try:
                     # Wait for the next frame to start, not for it to finish --
                     # once a byte has arrived, _recv_frame() below reads the
@@ -535,12 +476,6 @@ class AsyncSeedLink(_SeedLinkBase):
                     await asyncio.wait_for(self._ensure(1), timeout=_POLL_INTERVAL)
                 except TimeoutError:
                     now = time.monotonic()
-                    if now - last_data_time > self._idle_timeout:
-                        logger.warning("No data for over %.0fs, reconnecting", self._idle_timeout)
-                        await self.close()
-                        if not reconnect:
-                            raise SeedLinkTimeout(f"No data for over {self._idle_timeout:.0f}s") from None
-                        continue
                     if next_keepalive is not None and now >= next_keepalive:
                         next_keepalive = now + self._keepalive
                         try:
@@ -571,17 +506,22 @@ class AsyncSeedLink(_SeedLinkBase):
                     if not reconnect:
                         raise SeedLinkError(frame.message or "Stream error", frame.code)
                     continue
+                if self._is_json_error_frame(frame):  # v4 JSON ERROR packet
+                    message = self._json_error_message(frame.payload)
+                    logger.warning("Server error during streaming: %s", message)
+                    await self.close()
+                    if not reconnect:
+                        raise SeedLinkError(message)
+                    continue
 
-                if frame.payload_format == FORMAT_XML or (
-                    frame.payload_format == FORMAT_JSON and frame.payload_subformat == SUBFORMAT_JSON_INFO
-                ):
+                if self._is_info_frame(frame):
                     continue  # our own (or an interleaved) INFO reply; never yielded -- and
                     # doesn't reset the idle-timeout clock, which tracks data, not keepalives
                 last_data_time = time.monotonic()
                 pkt = self._to_packet(frame)
                 self._update_stream_state(pkt)
                 yield pkt
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, GeneratorExit):
             await self.close()
             raise
 

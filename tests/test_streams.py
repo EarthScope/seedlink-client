@@ -185,24 +185,24 @@ class TestStreamTimestampDeferred:
     def test_resolved_lazily_and_cached(self):
         stream = Stream(station_id="IU_KONO")
         pkt = _FakePacket(starttime="2025-01-01T00:00:00.0000Z")
-        stream._ts_pkt = pkt
-        assert pkt.parse_count == 0  # not parsed until read
-        assert stream.timestamp == "2025-01-01T00:00:00.0000Z"
-        assert stream.timestamp == "2025-01-01T00:00:00.0000Z"
-        assert pkt.parse_count == 1  # second read used the cached string
+        stream.pending_packet = pkt
+        assert pkt.parse_count == 0  # not parsed until resolved
+        assert stream.resolve_timestamp() == "2025-01-01T00:00:00.0000Z"
+        assert stream.resolve_timestamp() == "2025-01-01T00:00:00.0000Z"
+        assert pkt.parse_count == 1  # second call used the cached string
 
     def test_unparseable_payload_keeps_previous_timestamp(self):
         stream = Stream(station_id="IU_KONO", timestamp="2020-01-01T00:00:00.0000Z")
-        stream._ts_pkt = _FakePacket(error=SeedLinkError("not miniSEED"))
-        assert stream.timestamp == "2020-01-01T00:00:00.0000Z"
+        stream.pending_packet = _FakePacket(error=SeedLinkError("not miniSEED"))
+        assert stream.resolve_timestamp() == "2020-01-01T00:00:00.0000Z"
 
-    def test_direct_assignment_overrides_pending_packet(self):
-        pkt = _FakePacket(starttime="2025-01-01T00:00:00.0000Z")
+    def test_direct_assignment_is_immediate(self):
+        """timestamp is a plain field, not intercepted -- recover_state()
+        (and any other direct assignment) takes effect right away."""
         stream = Stream(station_id="IU_KONO")
-        stream._ts_pkt = pkt
         stream.timestamp = "2030-01-01T00:00:00.0000Z"
         assert stream.timestamp == "2030-01-01T00:00:00.0000Z"
-        assert pkt.parse_count == 0  # overwritten, never parsed
+        assert stream.resolve_timestamp() == "2030-01-01T00:00:00.0000Z"
 
 
 class TestStreamCopySemantics:
@@ -224,10 +224,10 @@ class TestStreamCopySemantics:
 
     def test_deepcopy_resolves_and_drops_pending_packet(self):
         stream = Stream(station_id="IU_KONO")
-        stream._ts_pkt = _FakePacket(starttime="2025-06-01T00:00:00.0000Z")
+        stream.pending_packet = _FakePacket(starttime="2025-06-01T00:00:00.0000Z")
         clone = copy.deepcopy(stream)
         assert clone.timestamp == "2025-06-01T00:00:00.0000Z"
-        assert "_ts_pkt" not in clone.__dict__
+        assert clone.pending_packet is None
 
     def test_pickle_roundtrip(self):
         stream = Stream(station_id="IU_KONO", seqnum=5, timestamp="2020-01-01T00:00:00.0000Z")

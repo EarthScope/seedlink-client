@@ -12,6 +12,7 @@ from __future__ import annotations
 import fnmatch
 import re
 from dataclasses import dataclass, field
+from typing import Any
 
 from .protocol import SeedLinkError
 
@@ -30,11 +31,19 @@ class Stream:
         all_data:   Request the earliest available data (v4 ``DATA ALL``),
                     overriding ``seqnum``.
         timestamp:  ISO time of the last packet received for this stream,
-                    if resuming from saved state. Set from a live data
-                    packet, the underlying miniSEED record isn't parsed
-                    until this is actually read -- so tracking it while
-                    streaming costs nothing unless something (e.g.
-                    save_state()) asks for it.
+                    if resuming from saved state. While streaming, this is
+                    only current as of the last :meth:`resolve_timestamp`
+                    call -- see ``pending_packet`` below.
+
+    ``pending_packet`` (set by :meth:`~seedlink_client._base._SeedLinkBase._update_stream_state`
+    as packets arrive) holds the most recent matching packet whose start
+    time hasn't been parsed out yet. Deferred like this because parsing a
+    miniSEED record just to get its start time would otherwise happen on
+    every packet, for every stream, whether or not anything ever reads the
+    timestamp; :meth:`resolve_timestamp` does that parse -- and
+    :func:`~seedlink_client.state.save_state` calls it -- only when a
+    current value is actually needed. It isn't a dataclass field, so it's
+    excluded from equality, repr, and ``dataclasses.asdict``/``replace``.
     """
 
     station_id: str
@@ -43,54 +52,48 @@ class Stream:
     all_data: bool = False
     timestamp: str | None = None
 
+    def __post_init__(self) -> None:
+        self.pending_packet: Any = None
+        self._match_re: re.Pattern[str] | None = None       # matches()'s compiled-pattern cache
+        self._match_re_pattern: str | None = None
+
     def matches(self, station_id: str) -> bool:
         """Whether this (possibly wildcarded) station ID pattern matches."""
         pattern = self.station_id
         if not any(c in pattern for c in "*?["):
             return station_id == pattern
-        compiled = self.__dict__.get("_match_re")
-        if compiled is None or self.__dict__.get("_match_re_pattern") != pattern:
-            compiled = re.compile(fnmatch.translate(pattern))
-            self.__dict__["_match_re"] = compiled
-            self.__dict__["_match_re_pattern"] = pattern
-        return compiled.match(station_id) is not None
+        if self._match_re is None or self._match_re_pattern != pattern:
+            self._match_re = re.compile(fnmatch.translate(pattern))
+            self._match_re_pattern = pattern
+        return self._match_re.match(station_id) is not None
 
-    def _get_timestamp(self) -> str | None:
-        """Format and cache the pending packet's start time, if any.
+    def resolve_timestamp(self) -> str | None:
+        """Parse and cache the pending packet's start time, if any.
 
-        Deferred so that tracking a stream's resume position while
-        streaming never forces a miniSEED parse unless the timestamp is
-        actually read.
+        Returns:
+            The current timestamp: freshly resolved from ``pending_packet``
+            if one was waiting, otherwise whatever was already stored.
         """
-        pkt = self.__dict__.pop("_ts_pkt", None)
+        pkt = self.pending_packet
         if pkt is not None:
+            self.pending_packet = None
             try:
-                self.__dict__["_timestamp_str"] = pkt.record().starttime_str()
+                self.timestamp = pkt.record().starttime_str()
             except SeedLinkError:
                 pass  # leave the previously stored timestamp, if any
-        return self.__dict__.get("_timestamp_str")
-
-    def _set_timestamp(self, value: str | None) -> None:
-        self.__dict__.pop("_ts_pkt", None)
-        self.__dict__["_timestamp_str"] = value
+        return self.timestamp
 
     def __getstate__(self) -> dict:
-        self._get_timestamp()  # resolve any pending packet before copying
+        self.resolve_timestamp()  # resolve any pending packet before copying
         state = dict(self.__dict__)
-        state.pop("_ts_pkt", None)
-        state.pop("_match_re", None)  # matches()'s compiled-pattern cache
+        state.pop("_match_re", None)  # matches()'s compiled-pattern cache; rebuilt lazily
         state.pop("_match_re_pattern", None)
         return state
 
     def __setstate__(self, state: dict) -> None:
+        self._match_re = None
+        self._match_re_pattern = None
         self.__dict__.update(state)
-
-
-# Attached after @dataclass runs so the generated __init__(timestamp=None),
-# __repr__, and __eq__ are unaffected -- they all just read/write
-# self.timestamp, which this property intercepts to defer the actual
-# miniSEED parse (see _get_timestamp) until the timestamp is read.
-Stream.timestamp = property(Stream._get_timestamp, Stream._set_timestamp)
 
 
 def v3_to_v4_selector(selector: str) -> str | None:
@@ -135,8 +138,12 @@ def v4_to_v3_selector(selector: str) -> str | None:
     Only selectors built from classic single-character band/source/
     subsource codes (as v3 itself requires) have a v3 equivalent; anything
     else -- a wildcarded location other than ``*``, or a subsource code
-    longer than one character -- returns None, meaning "no v3 equivalent,
-    drop it when talking v3".
+    longer than one character -- returns None, meaning "not convertible".
+    The caller decides what to do with that: :func:`_commands._wire_selector`
+    sends such a selector to a v3 server unconverted, on the theory that a
+    server may still recognize syntax this function doesn't -- so a v3
+    server rejecting it is possible, and is handled at the negotiation
+    level (see :class:`_commands.NegotiationWalk`), not here.
     """
     streamid, sep, rest = selector.partition(".")
     type_suffix = f".{rest}" if sep else ""

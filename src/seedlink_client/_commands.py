@@ -22,8 +22,9 @@ across all three negotiation shapes (v4, v3 multi-station, v3 uni-station).
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
 
@@ -37,6 +38,8 @@ from .protocol import (
 )
 from .streams import Stream, v3_to_v4_selector, v4_to_v3_selector
 from .time_utils import parse_timestring, to_comma_timestring, to_iso_timestring
+
+logger = logging.getLogger(__name__)
 
 Role = Literal["generic", "station", "select", "data", "end"]
 
@@ -129,14 +132,6 @@ def auth_jwt(token: str) -> Command:
 def batch() -> Command:
     """BATCH (v3). Non-fatal if rejected -- the caller just stays unbatched."""
     return Command("BATCH", parse=parse_reply)
-
-
-def cat() -> Command:
-    """CAT: legacy freeform station listing, superseded by INFO STATIONS in
-    v4. Not used by the negotiation planners; available for direct/
-    interactive use only, where the caller reads the freeform reply itself.
-    """
-    return Command("CAT", parse=None)
 
 
 def bye() -> Command:
@@ -254,6 +249,54 @@ def end_v4(dialup: bool) -> Command:
 
 
 # ---------------------------------------------------------------------------
+# Negotiation walk -- shared by both transports' negotiate()
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class NegotiationWalk:
+    """Tracks accept/skip state while a transport sends a plan_negotiation()
+    plan and reads each command's reply.
+
+    Both transports send commands themselves (blocking vs. ``await``ed I/O)
+    and call back into this one command at a time: :meth:`should_send` first
+    (a rejected v3 STATION means its stream's SELECT/DATA are skipped, not
+    sent), then :meth:`record` with the reply once sent. :meth:`finish`
+    raises if no station was ever accepted (v3 multi-station).
+    """
+
+    seen_station_role: bool = field(default=False, init=False)
+    accepted_any_station: bool = field(default=False, init=False)
+    _skip_stream: bool = field(default=False, init=False)
+
+    def should_send(self, cmd: Command) -> bool:
+        if cmd.role == "station":
+            self.seen_station_role = True
+            self._skip_stream = False
+            return True
+        return not (self._skip_stream and cmd.role in ("select", "data"))
+
+    def record(self, cmd: Command, resp: SeedLinkResponse | None) -> None:
+        if cmd.role == "station":
+            if resp is not None and not resp:
+                logger.warning("Station %s rejected: %s", cmd.stream_id, resp.message)
+                self._skip_stream = True
+                return
+            self.accepted_any_station = True
+        elif cmd.role == "select" and resp is not None and not resp:
+            logger.warning(
+                "SELECT rejected for %s: %s -- station stays subscribed without this filter",
+                cmd.stream_id, resp.message,
+            )
+        elif cmd.role == "data" and resp is not None and not resp:
+            logger.warning("%s rejected for %s: %s", cmd.text.split()[0], cmd.stream_id, resp.message)
+
+    def finish(self) -> None:
+        if self.seen_station_role and not self.accepted_any_station:
+            raise SeedLinkError("No stations accepted")
+
+
+# ---------------------------------------------------------------------------
 # Planners
 # ---------------------------------------------------------------------------
 
@@ -329,14 +372,28 @@ def plan_negotiation(
         return (stream.seqnum + 1) if (resume and stream.seqnum is not None) else None
 
     def _resume_timestamp(stream: Stream, seqnum: int | None) -> str | None:
-        if not (lastpkttime and seqnum is not None and stream.timestamp):
+        if not (lastpkttime and seqnum is not None):
             return None
-        return to_comma_timestring(parse_timestring(stream.timestamp))
+        timestamp = stream.resolve_timestamp()
+        if not timestamp:
+            return None
+        try:
+            return to_comma_timestring(parse_timestring(timestamp))
+        except ValueError:
+            logger.warning(
+                "Ignoring unparsable saved timestamp %r for %s", timestamp, stream.station_id
+            )
+            return None
 
     def _wire_selector(selector: str) -> str:
         """Convert a selector to the negotiated protocol's syntax if it
         looks like it's written in the other one; already-native selectors
-        (and ones with no equivalent) pass through unchanged."""
+        (and ones with no v3/v4 equivalent -- e.g. a v4 selector using a
+        multi-character subsource code, which v3 has no syntax for at all)
+        pass through unchanged, on the chance the server recognizes it
+        anyway. If it doesn't, the server rejects the SELECT and
+        NegotiationWalk logs that the station stays subscribed without it,
+        rather than silently dropping the filter."""
         if protocol is Protocol.V4:
             return v3_to_v4_selector(selector) or selector
         return v4_to_v3_selector(selector) or selector
@@ -347,9 +404,10 @@ def plan_negotiation(
             commands.append(station_v4(stream.station_id))
             for selector in stream.selectors:
                 commands.append(select_v4(stream.station_id, _wire_selector(selector)))
-            commands.append(
-                data_v4(stream.station_id, _resume_seqnum(stream), stream.all_data, start_time, end_time)
-            )
+            # A set time window always overrides sequence resumption, matching
+            # v3's TIME-vs-DATA/FETCH choice above.
+            seqnum = None if start_time is not None else _resume_seqnum(stream)
+            commands.append(data_v4(stream.station_id, seqnum, stream.all_data, start_time, end_time))
         commands.append(end_v4(dialup))
         return commands
 
@@ -357,8 +415,9 @@ def plan_negotiation(
         if len(streams) != 1:
             raise SeedLinkError("v3 uni-station mode requires exactly one stream")
         stream = streams[0]
+        expect_reply = not batch_active
         commands = [
-            select_v3(stream.station_id, _wire_selector(selector), expect_reply=True)
+            select_v3(stream.station_id, _wire_selector(selector), expect_reply)
             for selector in stream.selectors
         ]
         if start_str:

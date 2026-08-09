@@ -40,6 +40,23 @@ class TestArgumentParsing:
         args = _build_parser().parse_args(["--protocol", "3"])
         assert args.protocol == "3"
 
+    def test_dash3_and_dash4_shorthands(self):
+        assert _build_parser().parse_args(["-3"]).protocol == "3"
+        assert _build_parser().parse_args(["-4"]).protocol == "4"
+
+    def test_protocol_shorthands_mutually_exclusive(self):
+        import pytest
+
+        with pytest.raises(SystemExit):
+            _build_parser().parse_args(["-3", "-4"])
+        with pytest.raises(SystemExit):
+            _build_parser().parse_args(["-3", "--protocol", "4"])
+
+    def test_dash3_coexists_with_server_positional(self):
+        args = _build_parser().parse_args(["-3", "myhost"])
+        assert args.protocol == "3"
+        assert args.server == "myhost"
+
     def test_dialup_and_batch_flags(self):
         args = _build_parser().parse_args(["-d", "-b"])
         assert args.dialup
@@ -104,11 +121,102 @@ class TestConfigureStreams:
         assert args.server == "myhost"
 
 
-def make_shell() -> tuple[SeedLinkShell, MagicMock]:
+def make_shell(details: int = 0, unpack: bool = False) -> tuple[SeedLinkShell, MagicMock]:
     sl = MagicMock()
     sl.protocol = Protocol.V4
-    shell = SeedLinkShell(sl)
+    shell = SeedLinkShell(sl, details=details, unpack=unpack)
     return shell, sl
+
+
+def _suppress_watcher_thread(monkeypatch) -> None:
+    """_finish_handshake() spawns a daemon thread to watch stdin for Enter;
+    under pytest that thread's select() call blows up on the captured stdin
+    (no real fileno), so tests that don't care about it patch it away."""
+    import seedlink_client.cli as cli_module
+
+    class _NoThread:
+        def __init__(self, target=None, daemon=None):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(cli_module.threading, "Thread", _NoThread)
+
+
+class TestCmdloopLibeditFix:
+    """cmd.Cmd's own readline setup binds Tab with GNU readline's "tab:
+    complete" syntax; libedit (macOS's readline backend before Python 3.13)
+    silently ignores it, so Tab just inserts a literal tab. cmdloop()
+    rewrites that one call to libedit's own bind syntax for its duration.
+    cli.py imports readline locally inside cmdloop(), so these patch the
+    real readline module (the same object Python's import cache hands back)."""
+
+    def test_translates_bind_for_libedit(self, monkeypatch):
+        import cmd as cmd_module
+        import readline
+
+        monkeypatch.setattr(readline, "__doc__", "... libedit ...", raising=False)
+        calls = []
+        monkeypatch.setattr(readline, "parse_and_bind", calls.append, raising=False)
+
+        def fake_super_cmdloop(self, intro=None):
+            import readline as rl
+            rl.parse_and_bind(f"{self.completekey}: complete")
+
+        monkeypatch.setattr(cmd_module.Cmd, "cmdloop", fake_super_cmdloop)
+        shell, sl = make_shell()
+        shell.cmdloop()
+        assert calls == ["bind ^I rl_complete"]
+
+    def test_leaves_other_binds_untouched_under_libedit(self, monkeypatch):
+        import cmd as cmd_module
+        import readline
+
+        monkeypatch.setattr(readline, "__doc__", "... libedit ...", raising=False)
+        calls = []
+        monkeypatch.setattr(readline, "parse_and_bind", calls.append, raising=False)
+
+        def fake_super_cmdloop(self, intro=None):
+            import readline as rl
+            rl.parse_and_bind("set editing-mode emacs")
+
+        monkeypatch.setattr(cmd_module.Cmd, "cmdloop", fake_super_cmdloop)
+        shell, sl = make_shell()
+        shell.cmdloop()
+        assert calls == ["set editing-mode emacs"]
+
+    def test_restores_parse_and_bind_after_loop(self, monkeypatch):
+        import cmd as cmd_module
+        import readline
+
+        def original(arg):
+            pass
+
+        monkeypatch.setattr(readline, "__doc__", "... libedit ...", raising=False)
+        monkeypatch.setattr(readline, "parse_and_bind", original, raising=False)
+        monkeypatch.setattr(cmd_module.Cmd, "cmdloop", lambda self, intro=None: None)
+
+        shell, sl = make_shell()
+        shell.cmdloop()
+        assert readline.parse_and_bind is original
+
+    def test_gnu_readline_untouched(self, monkeypatch):
+        """No libedit marker in readline.__doc__ -- delegate straight through,
+        no monkeypatching at all."""
+        import cmd as cmd_module
+        import readline
+
+        def original(arg):
+            pass
+
+        monkeypatch.setattr(readline, "__doc__", "GNU readline", raising=False)
+        monkeypatch.setattr(readline, "parse_and_bind", original, raising=False)
+        monkeypatch.setattr(cmd_module.Cmd, "cmdloop", lambda self, intro=None: None)
+
+        shell, sl = make_shell()
+        shell.cmdloop()
+        assert readline.parse_and_bind is original
 
 
 class TestSeedLinkShell:
@@ -140,15 +248,213 @@ class TestSeedLinkShell:
         sl.info_dict.assert_called_once_with("ID")
         assert "software: test" in capsys.readouterr().out
 
-    def test_end_starts_streaming(self):
-        shell, sl = make_shell()
-        shell.do_end("")
-        assert sl._streaming is True
-
     def test_quit_and_exit_are_aliases(self):
         shell, sl = make_shell()
         assert shell.do_quit("") is True
         assert shell.do_exit("") is True
+
+    def test_v3_data_after_station_expects_a_reply(self):
+        shell, sl = make_shell()
+        sl.protocol = Protocol.V3
+        shell.do_station("IU_KONO")
+        sl._streaming = False
+        shell.do_data("")
+        cmd = sl._send_command.call_args[0][0]
+        assert cmd.parse is not None
+        assert sl._streaming is False
+
+    def test_hello_does_not_promote_protocol(self):
+        shell, sl = make_shell()
+        shell.do_hello("")
+        sl._do_hello.assert_called_once_with(promote_protocol=False)
+
+    def test_hello_reports_unnegotiated_protocol(self, capsys):
+        shell, sl = make_shell()
+        sl.protocol = None
+        shell.do_hello("")
+        assert "not yet negotiated" in capsys.readouterr().out
+
+    def test_slproto_success_sets_protocol(self):
+        shell, sl = make_shell()
+        sl.protocol = None
+        sl._send_command.return_value = MagicMock(__bool__=lambda self: True)
+        shell.do_slproto("4.0")
+        assert sl.protocol is Protocol.V4
+
+    def test_slproto_v3_version_sets_protocol_v3(self):
+        shell, sl = make_shell()
+        sl.protocol = None
+        sl._send_command.return_value = MagicMock(__bool__=lambda self: True)
+        shell.do_slproto("3.1")
+        assert sl.protocol is Protocol.V3
+
+    def test_slproto_rejection_leaves_protocol_untouched(self):
+        from seedlink_client.protocol import SeedLinkError
+
+        shell, sl = make_shell()
+        sl.protocol = None
+        sl._send_command.side_effect = SeedLinkError("rejected")
+        shell.do_slproto("4.0")
+        assert sl.protocol is None
+        assert shell.had_error
+
+    def test_help_uppercases_protocol_commands(self, capsys):
+        shell, sl = make_shell()
+        shell.do_help("")
+        out = capsys.readouterr().out
+        assert "STATION" in out
+        assert "SLPROTO" in out
+        assert "quit" in out and "QUIT" not in out
+        assert "Typical SeedLink v4 handshake" in out
+
+    def test_help_topic_lookup_is_case_insensitive(self, capsys):
+        shell, sl = make_shell()
+        shell.do_help("STATION")
+        upper_out = capsys.readouterr().out
+        shell.do_help("station")
+        lower_out = capsys.readouterr().out
+        assert upper_out == lower_out
+        assert "select a station" in upper_out
+
+    def test_postcmd_ends_session_once_disconnected(self, capsys):
+        shell, sl = make_shell()
+        sl.is_connected = False
+        assert shell.postcmd(False, "station foo") is True
+        assert "Connection closed" in capsys.readouterr().out
+
+    def test_postcmd_continues_while_connected(self, capsys):
+        shell, sl = make_shell()
+        sl.is_connected = True
+        assert shell.postcmd(False, "station foo") is False
+        assert capsys.readouterr().out == ""
+
+    def test_postcmd_does_not_double_report_an_already_stopping_command(self, capsys):
+        """BYE/QUIT/EXIT already return True on their own -- postcmd() must
+        not print its own "Connection closed" on top of that."""
+        shell, sl = make_shell()
+        sl.is_connected = False
+        assert shell.postcmd(True, "quit") is True
+        assert capsys.readouterr().out == ""
+
+    def test_details_reports_current_setting(self, capsys):
+        shell, sl = make_shell(details=1)
+        shell.do_details("")
+        assert "Detail level 1, samples off." in capsys.readouterr().out
+
+    def test_details_sets_level(self, capsys):
+        shell, sl = make_shell()
+        shell.do_details("2")
+        assert shell.details == 2
+        assert "Detail level 2" in capsys.readouterr().out
+
+    def test_details_rejects_non_integer(self):
+        shell, sl = make_shell()
+        shell.do_details("many")
+        assert shell.had_error
+        assert shell.details == 0
+
+    def test_details_rejects_out_of_range(self):
+        shell, sl = make_shell()
+        shell.do_details("4")
+        assert shell.had_error
+        assert shell.details == 0
+
+    def test_samples_reports_current_setting(self, capsys):
+        shell, sl = make_shell(unpack=True)
+        shell.do_samples("")
+        assert "Samples on." in capsys.readouterr().out
+
+    def test_samples_toggles_on_and_off(self, capsys):
+        shell, sl = make_shell()
+        shell.do_samples("on")
+        assert shell.unpack is True
+        shell.do_samples("off")
+        assert shell.unpack is False
+
+    def test_samples_rejects_bad_argument(self):
+        shell, sl = make_shell()
+        shell.do_samples("maybe")
+        assert shell.had_error
+        assert shell.unpack is False
+
+
+class TestFinishHandshake:
+    """_finish_handshake() drives END and, in v3 uni-station mode, DATA/FETCH/TIME:
+    it sends the command, then prints packets until Enter or Ctrl-C. The watcher
+    thread is patched to a no-op here -- it only ever touches stdin/select,
+    exercised manually, not the packet loop or error handling this covers."""
+
+    def _run(self, monkeypatch, sl, packets_or_error, run=lambda shell: shell.do_end(""), **shell_kwargs):
+        _suppress_watcher_thread(monkeypatch)
+
+        def collect(reconnect):
+            if isinstance(packets_or_error, Exception):
+                raise packets_or_error
+            yield from packets_or_error
+
+        sl.collect.side_effect = collect
+        shell = SeedLinkShell(sl, **shell_kwargs)
+        run(shell)
+        return shell
+
+    def test_forwards_details_and_samples_settings(self, monkeypatch):
+        import seedlink_client.cli as cli_module
+
+        sl = MagicMock()
+        sl.protocol = Protocol.V4
+        pkt = SeedLinkPacket(station_id="IU_KONO", seqnum=1, payload_format="2",
+                              payload_subformat="D", payload=b"x")
+        calls = []
+        monkeypatch.setattr(cli_module, "_print_packet", lambda pkt, **kw: calls.append(kw))
+        self._run(monkeypatch, sl, [pkt], details=2, unpack=True)
+        assert calls == [{"details": 2, "unpack": True, "verbose": True}]
+
+    def test_prints_each_packet(self, monkeypatch, capsys):
+        sl = MagicMock()
+        sl.protocol = Protocol.V4
+        pkt = SeedLinkPacket(station_id="IU_KONO", seqnum=1, payload_format="2",
+                              payload_subformat="D", payload=b"x")
+        self._run(monkeypatch, sl, [pkt, pkt])
+        out = capsys.readouterr().out
+        assert out.count("seq 1") == 2
+
+    def test_streaming_flag_set_before_collect_is_called(self, monkeypatch):
+        """Regression guard: collect() re-negotiates (and can inject a wildcard
+        subscription) whenever _streaming is still False, so it must already be
+        True by the time collect() is invoked."""
+        sl = MagicMock()
+        sl.protocol = Protocol.V4
+        streaming_during_collect = []
+        _suppress_watcher_thread(monkeypatch)
+
+        def collect(reconnect):
+            streaming_during_collect.append(sl._streaming)
+            return iter(())
+
+        sl.collect.side_effect = collect
+        shell = SeedLinkShell(sl)
+        shell.do_end("")
+        assert streaming_during_collect == [True]
+        sl.collect.assert_called_once_with(reconnect=False)
+
+    def test_real_error_reported(self, monkeypatch):
+        from seedlink_client.protocol import SeedLinkError
+
+        sl = MagicMock()
+        sl.protocol = Protocol.V4
+        shell = self._run(monkeypatch, sl, SeedLinkError("connection reset"))
+        assert shell.had_error
+
+    def test_v3_data_with_no_prior_station_ends_handshake_and_streams(self, monkeypatch, capsys):
+        sl = MagicMock()
+        sl.protocol = Protocol.V3
+        pkt = SeedLinkPacket(station_id="IU_KONO", seqnum=1, payload_format="2",
+                              payload_subformat="D", payload=b"x")
+        self._run(monkeypatch, sl, [pkt], run=lambda shell: shell.do_data(""))
+        cmd = sl._send_command.call_args[0][0]
+        assert cmd.parse is None
+        assert sl._streaming is True
+        assert "seq 1" in capsys.readouterr().out
 
 
 def _make_mseed_packet(sourceid="FDSN:IU_COLA_00_B_H_Z", samplecnt=12) -> SeedLinkPacket:

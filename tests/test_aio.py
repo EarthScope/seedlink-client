@@ -12,9 +12,21 @@ from __future__ import annotations
 import asyncio
 import inspect
 import struct
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from seedlink_client.aio import AsyncSeedLink
 from seedlink_client.client import SeedLink
+from seedlink_client.protocol import (
+    FORMAT_JSON,
+    FORMAT_XML,
+    SUBFORMAT_JSON_ERROR,
+    SUBFORMAT_JSON_INFO,
+    SeedLinkError,
+    SeedLinkTimeout,
+    _RawFrame,
+)
 
 
 def run(coro):
@@ -97,6 +109,73 @@ class TestConnectAndInfo:
         run(scenario())
 
 
+class TestConnectHandshakeFlag:
+    def test_handshake_false_sends_nothing(self):
+        async def scenario():
+            sent_something = asyncio.Event()
+
+            async def handle(reader, writer):
+                try:
+                    data = await asyncio.wait_for(reader.read(100), timeout=0.3)
+                    if data:
+                        sent_something.set()
+                except TimeoutError:
+                    pass
+                writer.close()
+
+            server, port = await _serve_once(handle)
+            sl = AsyncSeedLink("127.0.0.1", port, timeout=5)
+            await sl.connect(handshake=False)
+            assert sl.is_connected
+            assert sl.protocol is None
+            await asyncio.sleep(0.35)
+            await sl.close()
+            server.close()
+            assert not sent_something.is_set()
+
+        run(scenario())
+
+
+class TestConnectWhileConnected:
+    """B4 regression: connect()/ping() must not tear down an existing
+    connection when called again while already connected."""
+
+    async def _connect_to_idle_server(self):
+        async def handle(reader, writer):
+            writer.write(b"SeedLink v3.1\r\nTest Server\r\n")
+            await writer.drain()
+            await reader.read(1)  # keep the connection open until the client disconnects
+
+        server, port = await _serve_once(handle)
+        sl = AsyncSeedLink("127.0.0.1", port, timeout=5)
+        await sl.connect()
+        return sl, server
+
+    def test_second_connect_raises_without_closing(self):
+        async def scenario():
+            sl, server = await self._connect_to_idle_server()
+            assert sl.is_connected
+            with pytest.raises(SeedLinkError, match="Already connected"):
+                await sl.connect()
+            assert sl.is_connected
+            await sl.close()
+            server.close()
+
+        run(scenario())
+
+    def test_ping_while_connected_raises_without_closing(self):
+        async def scenario():
+            sl, server = await self._connect_to_idle_server()
+            assert sl.is_connected
+            with pytest.raises(SeedLinkError, match="Already connected"):
+                await sl.ping()
+            assert sl.is_connected
+            await sl.close()
+            server.close()
+
+        run(scenario())
+
+
 class TestStreaming:
     def test_negotiate_and_collect_one_packet(self):
         async def scenario():
@@ -146,6 +225,79 @@ class TestStreaming:
                 assert sl._streams[0].seqnum == 7
                 assert sl._match_cache["IU_KONO"] == [sl._streams[0]]
             server.close()
+
+        run(scenario())
+
+
+class TestCollectIdleTimeout:
+    """B7 regression, async transport: see the sync client's
+    TestCollectIdleTimeout -- the idle timeout must fire even when
+    _ensure() keeps resolving immediately, as long as nothing but INFO
+    frames comes back."""
+
+    def test_fires_despite_constant_info_traffic(self):
+        async def scenario():
+            sl = AsyncSeedLink("127.0.0.1", 0)
+            sl._writer = MagicMock()  # is_connected -> True; no real socket needed
+            sl._writer.wait_closed = AsyncMock()
+            sl._streaming = True
+            sl._idle_timeout = 0.05
+
+            async def always_ready(n):
+                return None
+
+            info_frame = _RawFrame(station_id="", seqnum=None, payload_format=FORMAT_XML,
+                                    payload_subformat=SUBFORMAT_JSON_INFO, payload=b"<x/>",
+                                    info_continues=False)
+
+            async def recv_frame():
+                return info_frame
+
+            sl._ensure = always_ready
+            sl._recv_frame = recv_frame
+            gen = sl.collect(reconnect=False)
+            try:
+                with pytest.raises(SeedLinkTimeout, match="No data"):
+                    await gen.__anext__()
+            finally:
+                await gen.aclose()
+
+        run(scenario())
+
+
+class TestCollectJsonError:
+    """A mid-stream v4 JSON ERROR packet must be handled like a synchronous
+    ERROR reply line -- see the sync client's TestCollectJsonError -- not
+    yielded to the caller as an ordinary data packet."""
+
+    def test_raised_when_reconnect_false(self, caplog):
+        async def scenario():
+            sl = AsyncSeedLink("127.0.0.1", 0)
+            sl._writer = MagicMock()  # is_connected -> True; no real socket needed
+            sl._writer.wait_closed = AsyncMock()
+            sl._streaming = True
+
+            error_frame = _RawFrame(station_id="", seqnum=None, payload_format=FORMAT_JSON,
+                                     payload_subformat=SUBFORMAT_JSON_ERROR,
+                                     payload=b'{"message": "no such station"}',
+                                     info_continues=False)
+
+            async def always_ready(n):
+                return None
+
+            async def recv_frame():
+                return error_frame
+
+            sl._ensure = always_ready
+            sl._recv_frame = recv_frame
+            gen = sl.collect(reconnect=False)
+            try:
+                with caplog.at_level("WARNING"):
+                    with pytest.raises(SeedLinkError, match="no such station"):
+                        await gen.__anext__()
+                assert "no such station" in caplog.text
+            finally:
+                await gen.aclose()
 
         run(scenario())
 

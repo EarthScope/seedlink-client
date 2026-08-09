@@ -2,7 +2,11 @@
 
 ## Unreleased
 
-- Reduce per-packet CPU: defer state timestamp formatting, memoize station matching, and tighten v4 framing
+## 0.2.0
+
+- Add -3/-4 shorthand flags to pin the protocol version, alongside --protocol
+- Print packet details in the interactive shell with -p/-u, plus runtime `details`/`samples` commands to change the level mid-session
+- Many, many fixes and improvements
 
 ## 0.1.0
 

@@ -31,14 +31,14 @@ add_stream() is plain configuration and stays synchronous)::
 
     asyncio.run(main())
 
-Interactive client::
+Command-line client (non-interactive by default; ``-c`` drops into an
+interactive protocol shell)::
 
     seedlink-client [host:port]
 """
 
 from typing import TYPE_CHECKING
 
-from .cli import main
 from .client import SeedLink
 from .protocol import (
     Protocol,
@@ -51,12 +51,14 @@ from .protocol import (
 from .streams import Stream
 
 if TYPE_CHECKING:
-    # Only for type checkers/IDEs; the real (lazy) import is in __getattr__
-    # below, so importing seedlink_client doesn't pull in asyncio unless
-    # AsyncSeedLink is actually used.
+    # Only for type checkers/IDEs; the real (lazy) imports are in
+    # __getattr__ below, so importing seedlink_client doesn't pull in
+    # asyncio (AsyncSeedLink) or cmd/threading/select (main) unless one of
+    # them is actually used.
     from .aio import AsyncSeedLink
+    from .cli import main
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = [
     "AsyncSeedLink",
     "Protocol",
@@ -76,4 +78,8 @@ def __getattr__(name: str):
         from .aio import AsyncSeedLink
 
         return AsyncSeedLink
+    if name == "main":
+        from .cli import main
+
+        return main
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

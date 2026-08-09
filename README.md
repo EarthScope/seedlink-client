@@ -1,10 +1,10 @@
 # seedlink-client
 
-SeedLink protocol client for streaming geophysical (seismic) data, with transparent support for
-both [SeedLink 3.x](https://www.seiscomp.de/doc/apps/seedlink.html) and
+SeedLink protocol client for streaming geophysical (primarily seismic) data, with transparent support
+for both [SeedLink 3.x](https://www.seiscomp.de/doc/apps/seedlink.html) and
 [4.0](https://docs.fdsn.org/projects/seedlink/en/latest/protocol.html). SeedLink is a real-time
-streaming protocol used by seismological data systems (e.g. SeisComP, EarthScope's
-[ringserver](https://github.com/earthscope/ringserver)) to deliver miniSEED data as it is recorded.
+streaming protocol used by seismological data systems (e.g. [SeisComP](https://www.seiscomp.de/), EarthScope's [ringserver](https://github.com/earthscope/ringserver)) to deliver miniSEED data as it
+is recorded.
 
 Requires Python 3.11+.
 
@@ -66,5 +66,9 @@ seedlink-client [host:port]
 
 Default is `localhost:18000`. Use `seedlink-client --help` for options (stream selection, time
 windows, state files, INFO queries, TLS, auth). Pass `-c`/`--interactive` for a low-level
-interactive shell that sends individual protocol commands (`HELLO`, `STATION`, `SELECT`, `DATA`,
-`INFO`, ...).
+interactive shell that sends individual protocol commands (`HELLO`, `SLPROTO`, `STATION`,
+`SELECT`, `DATA`, `INFO`, ...) -- unlike the non-interactive client, it does not send `HELLO` or
+negotiate a protocol version on its own; type `HELLO`, then `SLPROTO 4.0` to upgrade if the
+server supports v4 (`HELP` shows a full example). `END` (or, in v3 uni-station mode,
+`DATA`/`FETCH`/`TIME` with no prior `STATION`) finishes the handshake and starts printing packets
+as they arrive, until Enter or Ctrl-C.

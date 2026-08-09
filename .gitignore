@@ -32,3 +32,6 @@ htmlcov/
 .DS_Store
 TODO
 CLAUDE.md
+
+# Profiler output (e.g. py-spy flamegraphs)
+*.svg

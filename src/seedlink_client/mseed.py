@@ -8,7 +8,7 @@ reply's XML text.
 
 from __future__ import annotations
 
-from pymseed import MS3Record, MiniSEEDError, sourceid2nslc
+from pymseed import MiniSEEDError, MS3Record, sourceid2nslc
 from pymseed.clib import buffer_pointer, clibmseed, ffi
 
 from .protocol import SeedLinkError

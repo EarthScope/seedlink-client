@@ -5,9 +5,10 @@ build-backend = "hatchling.build"
 [project]
 name = "seedlink-client"
 dynamic = ["version"]
-description = "SeedLink protocol 3.x and 4.x client for streaming geophysical (seismic) data"
+description = "SeedLink protocol 3.x and 4.x client for streaming geophysical (primarily seismic) data"
 readme = "README.md"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 authors = [
     { name = "EarthScope Data Services", email = "software@earthscope.org" },
@@ -16,7 +17,6 @@ keywords = ["seedlink", "seismology", "ringserver", "earthscope"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -26,11 +26,18 @@ classifiers = [
 ]
 dependencies = ["pymseed>=0.9.3"]
 
+[project.urls]
+Homepage = "https://github.com/EarthScope/seedlink-client"
+Repository = "https://github.com/EarthScope/seedlink-client"
+Issues = "https://github.com/EarthScope/seedlink-client/issues"
+Changelog = "https://github.com/EarthScope/seedlink-client/blob/main/CHANGELOG.md"
+
 [project.optional-dependencies]
 test = ["pytest>=7.0"]
+lint = ["ruff"]
 
 [project.scripts]
-seedlink-client = "seedlink_client:main"
+seedlink-client = "seedlink_client.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -42,5 +49,14 @@ path = "src/seedlink_client/__init__.py"
 packages = ["src/seedlink_client"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/seedlink_client"]
+include = ["src/seedlink_client", "tests", "CHANGELOG.md", "README.md", "LICENSE"]
 
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+# timezone.utc is used consistently and deliberately throughout; UP017's
+# datetime.UTC alias (3.11+) is a style preference, not a fix.
+ignore = ["UP017"]
