@@ -14,7 +14,8 @@ decision, and the planners are directly unit-testable without a socket.
 
 SeedLink's negotiation is more stateful than DataLink's simple 1:1
 command/reply model -- a rejected v3 STATION means skip that station's
-SELECT/DATA, and a rejected selector is logged but not fatal -- so
+SELECT/DATA, and a rejected selector is logged but not fatal unless all of
+a station's selectors are rejected -- so
 ``Command`` carries a little routing metadata (``role``, ``stream_id``) that
 the transport's negotiation loop uses to apply that behavior generically
 across all three negotiation shapes (v4, v3 multi-station, v3 uni-station).
@@ -297,20 +298,31 @@ class NegotiationWalk:
     Both transports send commands themselves (blocking vs. ``await``ed I/O)
     and call back into this one command at a time: :meth:`should_send` first
     (a rejected v3 STATION means its stream's SELECT/DATA are skipped, not
-    sent), then :meth:`record` with the reply once sent. :meth:`finish`
-    raises if no station was ever accepted (v3 multi-station).
+    sent), then :meth:`record` with the reply once sent. :meth:`should_send`
+    raises before a stream's DATA/FETCH/TIME if none of its selectors were
+    accepted, and :meth:`finish` raises if no station was ever accepted
+    (v3 multi-station).
     """
 
     seen_station_role: bool = field(default=False, init=False)
     accepted_any_station: bool = field(default=False, init=False)
     _skip_stream: bool = field(default=False, init=False)
+    _selects_sent: int = field(default=0, init=False)
+    _selects_accepted: int = field(default=0, init=False)
 
     def should_send(self, cmd: Command) -> bool:
         if cmd.role == "station":
             self.seen_station_role = True
             self._skip_stream = False
+            self._selects_sent = self._selects_accepted = 0
             return True
-        return not (self._skip_stream and cmd.role in ("select", "data"))
+        if self._skip_stream and cmd.role in ("select", "data"):
+            return False
+        if cmd.role == "data":
+            if self._selects_sent and not self._selects_accepted:
+                raise SeedLinkError(f"No selectors accepted for {cmd.stream_id}")
+            self._selects_sent = self._selects_accepted = 0
+        return True
 
     def record(self, cmd: Command, resp: SeedLinkResponse | None) -> None:
         if cmd.role == "station":
@@ -319,11 +331,12 @@ class NegotiationWalk:
                 self._skip_stream = True
                 return
             self.accepted_any_station = True
-        elif cmd.role == "select" and resp is not None and not resp:
-            logger.warning(
-                "SELECT rejected for %s: %s -- station stays subscribed without this filter",
-                cmd.stream_id, resp.message,
-            )
+        elif cmd.role == "select":
+            self._selects_sent += 1
+            if resp is not None and not resp:
+                logger.warning("SELECT rejected for %s: %s", cmd.stream_id, resp.message)
+            else:
+                self._selects_accepted += 1
         elif cmd.role == "data" and resp is not None and not resp:
             logger.warning("%s rejected for %s: %s", cmd.text.split()[0], cmd.stream_id, resp.message)
 
@@ -394,7 +407,8 @@ def plan_negotiation(
       DATA/FETCH/TIME; finally END. A rejected STATION means that
       stream's SELECT/DATA commands are skipped (the transport's
       negotiation loop does this via ``role``/``stream_id``); a rejected
-      SELECT or DATA/FETCH/TIME is logged but not fatal.
+      SELECT or DATA/FETCH/TIME is logged but not fatal, unless none of
+      a stream's selectors are accepted (also in v3 uni-station).
     - v3 uni-station (one wildcard stream, plus any stations received via
       it, which are not negotiated): no STATION, no END -- just SELECT(s)
       then DATA/FETCH/TIME.
@@ -445,8 +459,8 @@ def plan_negotiation(
         multi-character subsource code, which v3 has no syntax for at all)
         pass through unchanged, on the chance the server recognizes it
         anyway. If it doesn't, the server rejects the SELECT and
-        NegotiationWalk logs that the station stays subscribed without it,
-        rather than silently dropping the filter."""
+        NegotiationWalk logs it, failing negotiation if no selector of the
+        station is accepted, rather than silently dropping the filter."""
         if protocol is Protocol.V4:
             return v3_to_v4_selector(selector) or selector
         return v4_to_v3_selector(selector) or selector

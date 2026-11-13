@@ -25,6 +25,7 @@
 - Continue v4 negotiation when a station also matched by a wildcard station ID is rejected
 - Track stations received via '*' individually in all-station mode too, and save '*' with its sequence there
 - Resume a v4 time window from a known sequence number with DATA <seq> <start> [<end>]
+- Fail v3 negotiation when none of a station's selectors are accepted, instead of receiving all of its streams
 
 ## 0.2.0
 

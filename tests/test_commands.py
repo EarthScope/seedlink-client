@@ -147,17 +147,52 @@ class TestNegotiationWalk:
     """The shared per-command bookkeeping both transports' negotiate() loops
     drive; see client.SeedLink.negotiate() for how it's used."""
 
-    def test_rejected_select_logged_with_consequence(self, caplog):
+    @staticmethod
+    def _walk_plan(streams, replies, multistation=True):
+        """Drive a v3 plan through a walk, replying OK except as given in
+        ``replies`` (command text -> message); returns the commands sent."""
         from seedlink_client.protocol import SeedLinkResponse
 
         walk = NegotiationWalk()
-        cmd = next(c for c in plan_negotiation(
-            Protocol.V3, [Stream(station_id="IU_KONO", selectors=["B_H_ZZ"])],
-            dialup=False, multistation=True, resume=True, lastpkttime=True, batch_active=False,
-        ) if c.role == "select")
+        sent = []
+        for cmd in plan_negotiation(Protocol.V3, streams, dialup=False, multistation=multistation,
+                                    resume=True, lastpkttime=True, batch_active=False):
+            if not walk.should_send(cmd):
+                continue
+            sent.append(cmd.text)
+            msg = replies.get(cmd.text)
+            resp = None if cmd.parse is None else SeedLinkResponse(
+                status="ERROR" if msg else "OK", code=None, message=msg or "")
+            walk.record(cmd, resp)
+        walk.finish()
+        return sent
+
+    def test_rejected_select_logged(self, caplog):
+        streams = [Stream(station_id="IU_KONO", selectors=["BHZ", "BHN"])]
         with caplog.at_level("WARNING"):
-            walk.record(cmd, SeedLinkResponse(status="ERROR", code=None, message="bad selector"))
-        assert "stays subscribed without this filter" in caplog.text
+            sent = self._walk_plan(streams, {"SELECT BHN": "bad selector"})
+        assert "SELECT rejected for IU_KONO: bad selector" in caplog.text
+        assert sent[-2:] == ["DATA", "END"]
+
+    def test_all_selects_rejected_fatal(self):
+        streams = [Stream(station_id="GE_WLF"),
+                   Stream(station_id="IU_KONO", selectors=["BHZ", "BHN"])]
+        with pytest.raises(SeedLinkError, match="No selectors accepted for IU_KONO"):
+            self._walk_plan(streams, {"SELECT BHZ": "bad", "SELECT BHN": "bad"})
+
+    def test_all_selects_rejected_fatal_uni_station(self):
+        streams = [Stream(station_id="*", selectors=["BHZ"])]
+        with pytest.raises(SeedLinkError, match=r"No selectors accepted for \*"):
+            self._walk_plan(streams, {"SELECT BHZ": "bad"}, multistation=False)
+
+    def test_batched_selects_count_as_accepted(self):
+        from seedlink_client._commands import data_v3, select_v3
+
+        walk = NegotiationWalk()
+        select_cmd = select_v3("*", "BHZ", expect_reply=False)
+        walk.should_send(select_cmd)
+        walk.record(select_cmd, None)
+        assert walk.should_send(data_v3("*", "DATA", None, None, expect_reply=False))
 
     def test_rejected_station_skips_dependents(self):
         walk = NegotiationWalk()

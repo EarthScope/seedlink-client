@@ -297,6 +297,19 @@ class TestNegotiateV3MultiStationSkip:
             b"END\r\n",
         ]
 
+    def test_all_selectors_rejected_raises_before_data(self):
+        client = make_client(Protocol.V3)
+        client._streams = [Stream(station_id="IU_KONO", selectors=["BHZ", "BHN"])]
+        client._multistation = True
+        replies = iter([b"OK\r\n", b"ERROR\r\n", b"ERROR\r\n"])
+        client._sock.recv_into = MagicMock(side_effect=lambda buf: _consume(buf, next(replies)))
+        sock = client._sock
+        with pytest.raises(SeedLinkError, match="No selectors accepted for IU_KONO"):
+            client.negotiate()
+        sent_texts = [call.args[0] for call in sock.sendall.call_args_list]
+        assert sent_texts == [b"STATION KONO IU\r\n", b"SELECT BHZ\r\n", b"SELECT BHN\r\n"]
+        assert not client.is_connected
+
     def test_all_stations_rejected_raises(self):
         client = make_client(Protocol.V3)
         client._streams = [Stream(station_id="IU_KONO", selectors=["BHZ"])]
