@@ -539,6 +539,21 @@ class TestCollectUndecodablePacket:
         assert "Skipping undecodable packet seq=7" in caplog.text
 
 
+class TestInfoErrors:
+    def test_v4_json_error_raises(self):
+        client = make_client(Protocol.V4)
+        client._sock.recv_into = MagicMock(side_effect=_mock_recv_stream(
+            _v4_frame(b'{"message": "unknown level"}', station_id="", fmt="J", subfmt="E")))
+        with pytest.raises(SeedLinkError, match="unknown level"):
+            client.info("BOGUS")
+
+    def test_v3_error_line_raises_with_message(self):
+        client = make_client(Protocol.V3)
+        client._sock.recv_into = MagicMock(side_effect=_mock_recv_stream(b"ERROR\rno such level\r\n"))
+        with pytest.raises(SeedLinkError, match="no such level"):
+            client.info("BOGUS")
+
+
 class TestFromServerString:
     def test_default(self):
         client = SeedLink.from_server_string("")

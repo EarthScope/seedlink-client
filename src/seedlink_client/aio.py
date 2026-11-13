@@ -587,8 +587,12 @@ class AsyncSeedLink(_SeedLinkBase):
                 chunks = []
                 while True:
                     frame = await self._recv_frame()
+                    if isinstance(frame, SeedLinkResponse):  # v3 ERROR line
+                        raise SeedLinkError(frame.message or f"INFO {level} rejected", frame.code)
                     if not isinstance(frame, _RawFrame) or frame.payload_format not in (FORMAT_JSON, FORMAT_XML):
                         raise SeedLinkError("Expected an INFO reply")
+                    if self._is_json_error_frame(frame):  # v4 JSON ERROR packet
+                        raise SeedLinkError(self._json_error_message(frame.payload))
                     chunks.append(frame.payload.decode("utf-8", errors="replace"))
                     if not frame.info_continues:
                         break

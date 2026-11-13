@@ -23,6 +23,7 @@ from seedlink_client.protocol import (
     FORMAT_XML,
     SUBFORMAT_JSON_ERROR,
     SUBFORMAT_JSON_INFO,
+    Protocol,
     SeedLinkError,
     SeedLinkTimeout,
     _RawFrame,
@@ -106,6 +107,30 @@ class TestConnectAndInfo:
                 info = await sl.info_dict("ID")
                 assert info["software"] == "test"
             server.close()
+
+        run(scenario())
+
+
+class TestInfoErrors:
+    def test_v4_json_error_raises(self):
+        async def scenario():
+            async def handle(reader, writer):
+                lines = _LineReader(reader)
+                assert await lines.read_line() == "INFO BOGUS"
+                writer.write(_v4_frame(b'{"message": "unknown level"}', station_id="",
+                                       fmt="J", subfmt="E"))
+                await writer.drain()
+
+            server, port = await _serve_once(handle)
+            sl = AsyncSeedLink("127.0.0.1", port)
+            await sl.connect(handshake=False)
+            sl.protocol = Protocol.V4
+            try:
+                with pytest.raises(SeedLinkError, match="unknown level"):
+                    await sl.info("BOGUS")
+            finally:
+                await sl.close()
+                server.close()
 
         run(scenario())
 
