@@ -233,9 +233,12 @@ def data_v3(
     timestamp: str | None,
     expect_reply: bool,
 ) -> Command:
-    """DATA or FETCH [<seq> [<timestamp>]] (v3). ``cmd_name`` is 'DATA' or 'FETCH'."""
+    """DATA or FETCH [<seq> [<timestamp>]] (v3). ``cmd_name`` is 'DATA' or 'FETCH'.
+
+    The v3 sequence number is 6 hex digits on the wire, so it wraps at FFFFFF.
+    """
     if seqnum is not None:
-        text = f"{cmd_name} {seqnum:X}"
+        text = f"{cmd_name} {seqnum & 0xFFFFFF:X}"
         if timestamp:
             text += f" {timestamp}"
     else:

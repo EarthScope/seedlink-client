@@ -259,6 +259,13 @@ class TestPlanNegotiationV3Multi:
         data_cmd = next(c for c in cmds if c.role == "data")
         assert data_cmd.text == "DATA 65"  # 101 decimal -> unpadded hex
 
+    def test_data_sequence_wraps_at_24_bits(self):
+        streams = [Stream(station_id="IU_KONO", seqnum=0xFFFFFF)]
+        cmds = plan_negotiation(Protocol.V3, streams, dialup=False, multistation=True,
+                                 resume=True, lastpkttime=False, batch_active=False)
+        data_cmd = next(c for c in cmds if c.role == "data")
+        assert data_cmd.text == "DATA 0"
+
     def test_dialup_uses_fetch(self):
         streams = [Stream(station_id="IU_KONO")]
         cmds = plan_negotiation(Protocol.V3, streams, dialup=True, multistation=True,
