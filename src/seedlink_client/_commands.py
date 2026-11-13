@@ -37,7 +37,7 @@ from .protocol import (
     generate_client_id,
     parse_reply,
 )
-from .streams import Stream, v3_to_v4_selector, v4_to_v3_selector
+from .streams import Stream, is_wildcard, v3_to_v4_selector, v4_to_v3_selector
 from .time_utils import parse_timestring, to_comma_timestring, to_iso_timestring
 
 logger = logging.getLogger(__name__)
@@ -395,13 +395,23 @@ def plan_negotiation(
     A stream's ``all_data``/time window takes precedence over resuming
     from ``seqnum`` (v4 only -- v3 has no "all data" request). A set time
     window always overrides sequence resumption, matching libslink.
+
+    A wildcard station ID matching any exact one in ``streams`` is never
+    resumed from its own ``seqnum``, which may be from any station it
+    matches; those stations resume individually from their own entries.
     """
     start_str = to_comma_timestring(start_time) if start_time else None
     end_str = to_comma_timestring(end_time) if end_time else None
     cmd_name = "FETCH" if dialup else "DATA"
 
+    exact_ids = [s.station_id for s in streams if not is_wildcard(s.station_id)]
+
     def _resume_seqnum(stream: Stream) -> int | None:
-        return (stream.seqnum + 1) if (resume and stream.seqnum is not None) else None
+        if not resume or stream.seqnum is None:
+            return None
+        if is_wildcard(stream.station_id) and any(map(stream.matches, exact_ids)):
+            return None
+        return stream.seqnum + 1
 
     def _resume_timestamp(stream: Stream, seqnum: int | None) -> str | None:
         if not (lastpkttime and seqnum is not None):

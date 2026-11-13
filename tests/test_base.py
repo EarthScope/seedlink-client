@@ -140,6 +140,45 @@ class TestWildcardExpansion:
             "END",
         ]
 
+    def test_recovered_wildcard_sequence_not_resumed(self, tmp_path):
+        path = tmp_path / "state.txt"
+        save_state(str(path), [
+            Stream(station_id="IU_*", seqnum=5000, timestamp="2026-11-01T00:00:00.0Z"),
+            Stream(station_id="IU_ANMO", seqnum=6000),
+        ])
+        sl = self._client()
+        sl.recover_state(str(path))
+        sl.add_stream("IU_*")
+        sl._prepare_streams()
+        plan = _commands.plan_negotiation(
+            Protocol.V4, sort_streams(sl._streams), dialup=False, multistation=True,
+            resume=True, lastpkttime=False, batch_active=False,
+        )
+        assert [c.text for c in plan] == [
+            "STATION IU_ANMO", "DATA 6001",
+            "STATION IU_*", "DATA",
+            "END",
+        ]
+
+        sl.save_state(str(path))
+        lines = path.read_text().splitlines()[1:]
+        assert sorted(lines) == ["IU_* UNSET", "IU_ANMO 6000"]
+
+    def test_wildcard_without_exact_match_resumed(self):
+        sl = self._client()
+        sl.add_stream("IU_*", seqnum=5000)
+        sl.add_stream("GE_WLF", seqnum=10)
+        sl._prepare_streams()
+        plan = _commands.plan_negotiation(
+            Protocol.V4, sort_streams(sl._streams), dialup=False, multistation=True,
+            resume=True, lastpkttime=False, batch_active=False,
+        )
+        assert [c.text for c in plan] == [
+            "STATION GE_WLF", "DATA 11",
+            "STATION IU_*", "DATA 5001",
+            "END",
+        ]
+
     def test_packets_tracked_per_station(self, tmp_path):
         sl = self._client()
         sl.add_stream("II_*")

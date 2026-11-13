@@ -55,6 +55,19 @@ class TestSaveState:
         save_state(str(path), [Stream(station_id="XX_NONE")])
         assert "XX_NONE UNSET\n" in path.read_text()
 
+    def test_multistation_wildcard_unset(self, tmp_path):
+        path = tmp_path / "state.txt"
+        save_state(str(path), [
+            Stream(station_id="IU_*", seqnum=5000, timestamp="2026-11-01T00:00:00.0Z"),
+            Stream(station_id="IU_ANMO", seqnum=6000),
+        ], multistation=True)
+        assert path.read_text().splitlines()[1:] == ["IU_* UNSET", "IU_ANMO 6000"]
+
+    def test_uni_station_wildcard_keeps_sequence(self, tmp_path):
+        path = tmp_path / "state.txt"
+        save_state(str(path), [Stream(station_id="*", seqnum=5000)])
+        assert path.read_text().splitlines()[1:] == ["* 5000"]
+
     def test_no_timestamp_omitted(self, tmp_path):
         path = tmp_path / "state.txt"
         save_state(str(path), [Stream(station_id="IU_COLA", seqnum=5)])

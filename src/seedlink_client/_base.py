@@ -484,9 +484,11 @@ class _SeedLinkBase:
         """Write each stream's current sequence number and timestamp to a state file.
 
         Stations received via a wildcard station ID are written individually
-        with their own sequence numbers, alongside the wildcard entry itself.
+        with their own sequence numbers, alongside the wildcard entry itself,
+        which is written without one.
         """
-        state.save_state(path, self._streams)
+        state.save_state(path, self._streams,
+                         multistation=self._multistation or self._expand_wildcards)
 
     def recover_state(self, path: str) -> None:
         """Load a state file and apply its sequence numbers/timestamps to

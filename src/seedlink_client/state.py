@@ -10,19 +10,21 @@ from __future__ import annotations
 import os
 import secrets
 
-from .streams import Stream
+from .streams import Stream, is_wildcard
 
 _HEADER_V2 = "#V2 StationID  Sequence  [Timestamp]"
 
 
-def save_state(path: str, streams: list[Stream]) -> None:
+def save_state(path: str, streams: list[Stream], multistation: bool = False) -> None:
     """Write each stream's sequence number and last-packet timestamp.
 
     Format (one line per stream, matching libslink's #V2 state file)::
 
         StationID Sequence [Timestamp]
 
-    Sequence is decimal, or 'UNSET' if the stream has none yet.
+    Sequence is decimal, or 'UNSET' if the stream has none yet. With
+    ``multistation``, wildcard station IDs are always written as 'UNSET'
+    with no timestamp: stations received via them have their own entries.
 
     Written via a temporary file in the same directory, flushed to disk,
     then renamed into place, so a crash or interrupt mid-write can't leave
@@ -37,6 +39,9 @@ def save_state(path: str, streams: list[Stream]) -> None:
         with os.fdopen(fd, "w") as f:
             f.write(_HEADER_V2 + "\n")
             for stream in streams:
+                if multistation and is_wildcard(stream.station_id):
+                    f.write(f"{stream.station_id} UNSET\n")
+                    continue
                 seq = "UNSET" if stream.seqnum is None else str(stream.seqnum)
                 fields = [stream.station_id, seq]
                 timestamp = stream.resolve_timestamp()
