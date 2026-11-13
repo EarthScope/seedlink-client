@@ -455,6 +455,22 @@ class TestCollectIdleTimeout:
         with pytest.raises(SeedLinkTimeout, match="No data"):
             next(client.collect(reconnect=False))
 
+    def test_zero_disables(self):
+        client = make_client(Protocol.V4)
+        client._streaming = True
+        client._idle_timeout = 0
+        polls = iter([False, False])
+
+        def poll(timeout):
+            try:
+                return next(polls)
+            except StopIteration:
+                raise SeedLinkError("stop") from None
+
+        client._poll_readable = poll
+        with pytest.raises(SeedLinkError, match="stop"):
+            next(client.collect(reconnect=False))
+
     def test_keepalive_still_sent_while_quiet(self):
         """A quiet channel (nothing readable) still gets its periodic INFO
         ID heartbeat -- eventually hits the idle timeout too, here just used

@@ -749,7 +749,7 @@ def _build_parser():
         type=float,
         default=600.0,
         metavar="SECS",
-        help="Idle timeout before reconnecting (default: 600)",
+        help="Idle timeout before reconnecting, 0 to disable (default: 600)",
     )
     parser.add_argument("-d", "--dialup", action="store_true", help="Dial-up mode: fetch queued data, then exit")
     parser.add_argument("-b", "--batch", action="store_true", help="Request v3 BATCH mode")

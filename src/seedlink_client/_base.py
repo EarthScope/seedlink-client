@@ -60,6 +60,7 @@ class _SeedLinkBase:
         keepalive:  Send an INFO ID heartbeat this often (seconds) while
                     streaming. None disables keepalives.
         idle_timeout: Reconnect if no data arrives for this long (seconds).
+                    0 or None disables it.
         reconnect_delay: Seconds to wait between reconnection attempts.
         dialup:     Dial-up mode: fetch queued data then stop, instead of
                     streaming in real time.
@@ -86,7 +87,7 @@ class _SeedLinkBase:
         tls_noverify: bool = False,
         protocol: Protocol | None = None,
         keepalive: float | None = None,
-        idle_timeout: float = 600.0,
+        idle_timeout: float | None = 600.0,
         reconnect_delay: float = 30.0,
         dialup: bool = False,
         batch: bool = False,

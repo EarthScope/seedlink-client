@@ -457,7 +457,7 @@ class SeedLink(_SeedLinkBase):
         An INFO ID heartbeat is sent every ``keepalive`` seconds (its reply
         is consumed internally, never yielded); the connection is dropped
         and retried after ``reconnect_delay`` seconds if no data arrives for
-        ``idle_timeout`` seconds, unless ``reconnect`` is False.
+        ``idle_timeout`` seconds (if set), unless ``reconnect`` is False.
 
         Args:
             reconnect: If True (default), transparently reconnect and
@@ -488,7 +488,7 @@ class SeedLink(_SeedLinkBase):
                 # would otherwise keep the socket readable forever and this
                 # timeout would never get a chance to fire.
                 now = time.monotonic()
-                if now - last_data_time > self._idle_timeout:
+                if self._idle_timeout and now - last_data_time > self._idle_timeout:
                     logger.warning("No data for over %.0fs, reconnecting", self._idle_timeout)
                     self.close()
                     if not reconnect:

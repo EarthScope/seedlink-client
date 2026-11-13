@@ -497,7 +497,7 @@ class AsyncSeedLink(_SeedLinkBase):
                 # otherwise keep _ensure(1) resolving immediately and this
                 # timeout would never get a chance to fire.
                 now = time.monotonic()
-                if now - last_data_time > self._idle_timeout:
+                if self._idle_timeout and now - last_data_time > self._idle_timeout:
                     logger.warning("No data for over %.0fs, reconnecting", self._idle_timeout)
                     await self.close()
                     if not reconnect:
