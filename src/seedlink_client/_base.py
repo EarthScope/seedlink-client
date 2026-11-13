@@ -30,7 +30,7 @@ from .protocol import (
     parse_hello,
 )
 from .protocol import TLS_PORT as _TLS_PORT
-from .streams import Stream
+from .streams import Stream, sort_streams
 from .time_utils import parse_timestring
 
 # Default/minimum size of the persistent receive buffer. It grows to fit an
@@ -114,6 +114,7 @@ class _SeedLinkBase:
         self._recovered_state: dict[str, tuple[int | None, str | None]] = {}
         self._multistation = False
         self._all_stations = False
+        self._expand_wildcards = False
         self._start_time: datetime | None = None
         self._end_time: datetime | None = None
         self._streaming = False
@@ -248,9 +249,32 @@ class _SeedLinkBase:
         """
         cached = self._match_cache.get(station_id)
         if cached is None:
-            cached = [s for s in self._streams if s.matches(station_id)]
+            if self._expand_wildcards:
+                # Track each station seen under a wildcard as its own stream,
+                # leaving the wildcard itself without a sequence.
+                cached = [s for s in self._streams if s.station_id == station_id]
+                if not cached:
+                    derived = self._derive_stream(station_id)
+                    if derived is not None:
+                        cached = [derived]
+            else:
+                cached = [s for s in self._streams if s.matches(station_id)]
             self._match_cache[station_id] = cached
         return cached
+
+    def _derive_stream(
+        self, station_id: str, seqnum: int | None = None, timestamp: str | None = None
+    ) -> Stream | None:
+        """Add an exact-ID stream for ``station_id`` inheriting the selection
+        of the first wildcard stream that matches it, or return None if none does."""
+        for wildcard in sort_streams(self._streams):
+            if streams.is_wildcard(wildcard.station_id) and wildcard.matches(station_id):
+                stream = Stream(station_id=station_id, selectors=list(wildcard.selectors),
+                                seqnum=seqnum, all_data=wildcard.all_data,
+                                timestamp=timestamp)
+                self._streams.append(stream)
+                return stream
+        return None
 
     # -- Frame/packet handling, shared by both transports' collect() --------
 
@@ -362,6 +386,23 @@ class _SeedLinkBase:
             self._streams = [Stream(station_id="*")]
             self._apply_recovered_state(self._streams)
 
+    def _prepare_streams(self) -> None:
+        """Finalize the stream list before negotiation.
+
+        When STATION commands are sent (v4 or v3 multi-station), each
+        concrete station in recovered state that matches a wildcard stream
+        is added as its own stream, so it resumes from its own sequence.
+        """
+        self._ensure_default_stream()
+        self._expand_wildcards = self.protocol is Protocol.V4 or self._multistation
+        if not self._expand_wildcards:
+            return
+        known = {s.station_id for s in self._streams}
+        for station_id, (seqnum, timestamp) in self._recovered_state.items():
+            if station_id not in known and not streams.is_wildcard(station_id):
+                self._derive_stream(station_id, seqnum, timestamp)
+        self._match_cache.clear()
+
     def add_stream(
         self,
         station_id: str,
@@ -438,7 +479,11 @@ class _SeedLinkBase:
         self._end_time = parse_timestring(end) if isinstance(end, str) else end
 
     def save_state(self, path: str) -> None:
-        """Write each stream's current sequence number and timestamp to a state file."""
+        """Write each stream's current sequence number and timestamp to a state file.
+
+        Stations received via a wildcard station ID are written individually
+        with their own sequence numbers, alongside the wildcard entry itself.
+        """
         state.save_state(path, self._streams)
 
     def recover_state(self, path: str) -> None:
@@ -450,7 +495,8 @@ class _SeedLinkBase:
         :meth:`add_stream` and friends, or negotiated by default if none is
         configured at all. A later state file's entries take precedence
         over an earlier one's for the same station ID; both are otherwise
-        kept.
+        kept. Entries for concrete stations matching a wildcard station ID
+        are requested individually, ahead of the wildcard, at negotiation.
         """
         self._recovered_state.update(state.load_state(path))
         self._apply_recovered_state(self._streams)

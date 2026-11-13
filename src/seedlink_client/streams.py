@@ -17,6 +17,11 @@ from typing import Any
 from .protocol import SeedLinkError
 
 
+def is_wildcard(station_id: str) -> bool:
+    """Whether a station ID contains wildcard pattern characters."""
+    return any(c in station_id for c in "*?[")
+
+
 @dataclass
 class Stream:
     """One station's stream selection and resume position.
@@ -60,7 +65,7 @@ class Stream:
     def matches(self, station_id: str) -> bool:
         """Whether this (possibly wildcarded) station ID pattern matches."""
         pattern = self.station_id
-        if not any(c in pattern for c in "*?["):
+        if not is_wildcard(pattern):
             return station_id == pattern
         if self._match_re is None or self._match_re_pattern != pattern:
             self._match_re = re.compile(fnmatch.translate(pattern))

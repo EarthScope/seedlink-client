@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Log connection loss and pending reconnect during streaming
+- Track and resume per-station sequences for wildcard station IDs in the state file
 
 ## 0.2.0
 

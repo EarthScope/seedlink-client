@@ -5,9 +5,11 @@ _init_transport are abstract)."""
 
 from __future__ import annotations
 
+from seedlink_client import _commands
 from seedlink_client.client import SeedLink
+from seedlink_client.protocol import Protocol, SeedLinkPacket
 from seedlink_client.state import save_state
-from seedlink_client.streams import Stream
+from seedlink_client.streams import Stream, sort_streams
 
 
 class TestRecoverState:
@@ -97,3 +99,69 @@ class TestPublicProperties:
         sl.add_stream("IU_COLA")
         sl.streams.append(Stream(station_id="GE_WLF"))
         assert [s.station_id for s in sl.streams] == ["IU_COLA"]
+
+
+class TestWildcardExpansion:
+    """Stations received via a wildcard station ID are tracked, saved, and
+    resumed individually; the wildcard itself carries no sequence."""
+
+    @staticmethod
+    def _packet(station_id: str, seqnum: int) -> SeedLinkPacket:
+        return SeedLinkPacket(station_id=station_id, seqnum=seqnum,
+                              payload_format="2", payload_subformat="D", payload=b"")
+
+    def _client(self, protocol: Protocol = Protocol.V4) -> SeedLink:
+        sl = SeedLink()
+        sl.protocol = protocol
+        return sl
+
+    def test_recovered_stations_resumed_before_wildcards(self, tmp_path):
+        path = tmp_path / "state.txt"
+        save_state(str(path), [
+            Stream(station_id="II_AAK", seqnum=2),
+            Stream(station_id="II_BFO", seqnum=4),
+            Stream(station_id="II_*"),
+            Stream(station_id="AK_*"),
+        ])
+        sl = self._client()
+        sl.recover_state(str(path))
+        sl.add_streamlist("II_*:B_H_Z,AK_*")
+        sl._prepare_streams()
+        sl._prepare_streams()  # idempotent across reconnects
+        plan = _commands.plan_negotiation(
+            Protocol.V4, sort_streams(sl._streams), dialup=False, multistation=True,
+            resume=True, lastpkttime=False, batch_active=False,
+        )
+        assert [c.text for c in plan] == [
+            "STATION II_AAK", "SELECT B_H_Z", "DATA 3",
+            "STATION II_BFO", "SELECT B_H_Z", "DATA 5",
+            "STATION AK_*", "DATA",
+            "STATION II_*", "SELECT B_H_Z", "DATA",
+            "END",
+        ]
+
+    def test_packets_tracked_per_station(self, tmp_path):
+        sl = self._client()
+        sl.add_stream("II_*")
+        sl.add_stream("II_BFO")
+        sl._prepare_streams()
+        sl._update_stream_state(self._packet("II_AAK", 10))
+        sl._update_stream_state(self._packet("II_AAK", 11))
+        sl._update_stream_state(self._packet("II_BFO", 20))
+        seqs = {s.station_id: s.seqnum for s in sl.streams}
+        assert seqs == {"II_*": None, "II_BFO": 20, "II_AAK": 11}
+
+        path = tmp_path / "state.txt"
+        sl.save_state(str(path))
+        lines = path.read_text().splitlines()[1:]
+        assert sorted(lines) == ["II_* UNSET", "II_AAK 11", "II_BFO 20"]
+
+    def test_v3_uni_station_not_expanded(self, tmp_path):
+        path = tmp_path / "state.txt"
+        save_state(str(path), [Stream(station_id="II_AAK", seqnum=2)])
+        sl = self._client(Protocol.V3)
+        sl.recover_state(str(path))
+        sl.set_all_stations()
+        sl._prepare_streams()
+        sl._update_stream_state(self._packet("II_AAK", 3))
+        assert [(s.station_id, s.seqnum) for s in sl.streams] == [("*", 3)]

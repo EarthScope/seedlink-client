@@ -398,7 +398,7 @@ class AsyncSeedLink(_SeedLinkBase):
 
     async def _negotiate(self) -> None:
         self._match_cache.clear()
-        self._ensure_default_stream()
+        self._prepare_streams()
         plan = _commands.plan_negotiation(
             self.protocol, sort_streams(self._streams), self._dialup, self._multistation,
             resume=True, lastpkttime=True, batch_active=self._batch_active,

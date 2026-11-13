@@ -380,7 +380,7 @@ class SeedLink(_SeedLinkBase):
                 (v4) if any STATION/SELECT/DATA command was rejected.
         """
         self._match_cache.clear()
-        self._ensure_default_stream()
+        self._prepare_streams()
         plan = _commands.plan_negotiation(
             self.protocol, sort_streams(self._streams), self._dialup, self._multistation,
             resume=True, lastpkttime=True, batch_active=self._batch_active,
