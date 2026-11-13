@@ -23,6 +23,7 @@
 - Resume a wildcard station ID that matches an exact one with plain DATA, and save it as UNSET in multi-station mode
 - Combine the selectors of all matching wildcard station IDs for a station received via them
 - Continue v4 negotiation when a station also matched by a wildcard station ID is rejected
+- Track stations received via '*' individually in all-station mode too, and save '*' with its sequence there
 
 ## 0.2.0
 

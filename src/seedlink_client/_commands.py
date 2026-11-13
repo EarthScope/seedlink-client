@@ -394,22 +394,27 @@ def plan_negotiation(
       stream's SELECT/DATA commands are skipped (the transport's
       negotiation loop does this via ``role``/``stream_id``); a rejected
       SELECT or DATA/FETCH/TIME is logged but not fatal.
-    - v3 uni-station (exactly one stream): no STATION, no END -- just
-      SELECT(s) then DATA/FETCH/TIME.
+    - v3 uni-station (one wildcard stream, plus any stations received via
+      it, which are not negotiated): no STATION, no END -- just SELECT(s)
+      then DATA/FETCH/TIME.
 
     A stream's ``all_data``/time window takes precedence over resuming
     from ``seqnum`` (v4 only -- v3 has no "all data" request). A set time
     window always overrides sequence resumption, matching libslink.
 
-    A wildcard station ID matching any exact one in ``streams`` is never
-    resumed from its own ``seqnum``, which may be from any station it
-    matches; those stations resume individually from their own entries.
+    Except in v3 uni-station mode, a wildcard station ID matching any
+    exact one in ``streams`` is never resumed from its own ``seqnum``,
+    which may be from any station it matches; those stations resume
+    individually from their own entries.
     """
     start_str = to_comma_timestring(start_time) if start_time else None
     end_str = to_comma_timestring(end_time) if end_time else None
     cmd_name = "FETCH" if dialup else "DATA"
 
-    exact_ids = [s.station_id for s in streams if not is_wildcard(s.station_id)]
+    # v3 uni-station mode resumes its one wildcard stream from its own sequence.
+    exact_ids: list[str] = []
+    if protocol is Protocol.V4 or multistation:
+        exact_ids = [s.station_id for s in streams if not is_wildcard(s.station_id)]
 
     def _resume_seqnum(stream: Stream) -> int | None:
         if not resume or stream.seqnum is None:
@@ -465,9 +470,10 @@ def plan_negotiation(
         return commands
 
     if not multistation:
-        if len(streams) != 1:
+        uni_streams = [s for s in streams if is_wildcard(s.station_id)] or streams
+        if len(uni_streams) != 1:
             raise SeedLinkError("v3 uni-station mode requires exactly one stream")
-        stream = streams[0]
+        stream = uni_streams[0]
         expect_reply = not batch_active
         commands = [
             select_v3(stream.station_id, _wire_selector(selector), expect_reply)

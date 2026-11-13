@@ -103,7 +103,8 @@ class TestPublicProperties:
 
 class TestWildcardExpansion:
     """Stations received via a wildcard station ID are tracked, saved, and
-    resumed individually; the wildcard itself carries no sequence."""
+    resumed individually; the wildcard itself is not resumed or saved with
+    a sequence where it matches them in multi-station mode."""
 
     @staticmethod
     def _packet(station_id: str, seqnum: int) -> SeedLinkPacket:
@@ -207,19 +208,52 @@ class TestWildcardExpansion:
         sl._update_stream_state(self._packet("II_AAK", 11))
         sl._update_stream_state(self._packet("II_BFO", 20))
         seqs = {s.station_id: s.seqnum for s in sl.streams}
-        assert seqs == {"II_*": None, "II_BFO": 20, "II_AAK": 11}
+        assert seqs == {"II_*": 20, "II_BFO": 20, "II_AAK": 11}
 
         path = tmp_path / "state.txt"
         sl.save_state(str(path))
         lines = path.read_text().splitlines()[1:]
         assert sorted(lines) == ["II_* UNSET", "II_AAK 11", "II_BFO 20"]
 
-    def test_v3_uni_station_not_expanded(self, tmp_path):
+    def test_v3_uni_station_tracks_stations_but_negotiates_wildcard(self, tmp_path):
         path = tmp_path / "state.txt"
-        save_state(str(path), [Stream(station_id="II_AAK", seqnum=2)])
+        save_state(str(path), [Stream(station_id="*", seqnum=5),
+                               Stream(station_id="II_AAK", seqnum=2)])
         sl = self._client(Protocol.V3)
         sl.recover_state(str(path))
         sl.set_all_stations()
         sl._prepare_streams()
-        sl._update_stream_state(self._packet("II_AAK", 3))
-        assert [(s.station_id, s.seqnum) for s in sl.streams] == [("*", 3)]
+        plan = _commands.plan_negotiation(
+            Protocol.V3, sort_streams(sl._streams), dialup=False, multistation=False,
+            resume=True, lastpkttime=False, batch_active=False,
+        )
+        assert [c.text for c in plan] == ["DATA 6"]
+
+        sl._update_stream_state(self._packet("II_AAK", 7))
+        sl._update_stream_state(self._packet("GE_WLF", 8))
+        assert [(s.station_id, s.seqnum) for s in sl.streams] == [
+            ("*", 8), ("II_AAK", 7), ("GE_WLF", 8),
+        ]
+        sl.save_state(str(path))
+        assert path.read_text().splitlines()[1:] == ["* 8", "II_AAK 7", "GE_WLF 8"]
+
+    def test_v4_all_station_saves_wildcard_sequence(self, tmp_path):
+        sl = self._client()
+        sl.set_all_stations()
+        sl._prepare_streams()
+        sl._update_stream_state(self._packet("II_AAK", 7))
+        sl._update_stream_state(self._packet("GE_WLF", 8))
+        path = tmp_path / "state.txt"
+        sl.save_state(str(path))
+        assert path.read_text().splitlines()[1:] == ["* 8", "II_AAK 7", "GE_WLF 8"]
+
+        plan = _commands.plan_negotiation(
+            Protocol.V4, sort_streams(sl._streams), dialup=False, multistation=False,
+            resume=True, lastpkttime=False, batch_active=False,
+        )
+        assert [c.text for c in plan] == [
+            "STATION GE_WLF", "DATA 9",
+            "STATION II_AAK", "DATA 8",
+            "STATION *", "DATA",
+            "END",
+        ]

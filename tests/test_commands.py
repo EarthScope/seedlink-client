@@ -393,10 +393,16 @@ class TestPlanNegotiationV3Uni:
         assert select_cmd.parse is not None
 
     def test_requires_exactly_one_stream(self):
-        streams = [Stream(station_id="*"), Stream(station_id="IU_KONO")]
+        streams = [Stream(station_id="*"), Stream(station_id="IU_*")]
         with pytest.raises(SeedLinkError):
             plan_negotiation(Protocol.V3, streams, dialup=False, multistation=False,
                               resume=True, lastpkttime=True, batch_active=False)
+
+    def test_received_stations_not_negotiated(self):
+        streams = [Stream(station_id="IU_KONO", seqnum=9), Stream(station_id="*", seqnum=4)]
+        cmds = plan_negotiation(Protocol.V3, streams, dialup=False, multistation=False,
+                                 resume=True, lastpkttime=False, batch_active=False)
+        assert [c.text for c in cmds] == ["DATA 5"]
 
 
 class TestPlanNegotiationTolerated:

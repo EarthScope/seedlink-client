@@ -191,7 +191,8 @@ class TestUpdateStreamState:
                               payload_subformat="D", payload=b"x")
         client._update_stream_state(pkt)
         cached = client._match_cache["IU_KONO"]
-        assert cached == [stream]
+        assert [s.station_id for s in cached] == ["IU_*", "IU_KONO"]
+        assert cached[0] is stream
         client._update_stream_state(pkt)
         assert client._match_cache["IU_KONO"] is cached  # reused, not rebuilt
         client.add_stream("GE_WLF")
