@@ -25,6 +25,7 @@ from seedlink_client.protocol import (
     SUBFORMAT_JSON_INFO,
     Protocol,
     SeedLinkError,
+    SeedLinkTimeout,
     _RawFrame,
     _UndecodablePacket,
 )
@@ -395,6 +396,31 @@ class TestCollectJsonError:
                 assert "no such station" in caplog.text
             finally:
                 await gen.aclose()
+
+        run(scenario())
+
+
+class TestCollectStalledFrame:
+    def test_idle_timeout_bounds_partial_frame(self):
+        async def scenario():
+            async def handle(reader, writer):
+                writer.write(b"SE2D")  # header started, never finished
+                await writer.drain()
+                await asyncio.sleep(5)
+
+            server, port = await _serve_once(handle)
+            sl = AsyncSeedLink("127.0.0.1", port, idle_timeout=0.2)
+            await sl.connect(handshake=False)
+            sl.protocol = Protocol.V4
+            sl._streaming = True
+            gen = sl.collect(reconnect=False)
+            try:
+                with pytest.raises(SeedLinkTimeout, match="Timed out reading"):
+                    await asyncio.wait_for(gen.__anext__(), timeout=2)
+                assert not sl.is_connected
+            finally:
+                await gen.aclose()
+                server.close()
 
         run(scenario())
 

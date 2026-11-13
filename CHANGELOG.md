@@ -12,6 +12,7 @@
 - Raise SeedLinkError with the server's message when an INFO request is rejected
 - Treat an idle timeout of 0 (-nt 0) as disabled, matching slinktool
 - Reset the idle timeout on keepalive/INFO replies too, matching libslink
+- Bound reading a partly received packet by the idle timeout so a stalled frame can't hang collect()
 
 ## 0.2.0
 

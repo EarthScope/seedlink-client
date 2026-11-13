@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import socket
 import struct
 import time
 from unittest.mock import MagicMock
@@ -537,6 +538,24 @@ class TestCollectJsonError:
             with pytest.raises(SeedLinkError, match="no such station"):
                 next(client.collect(reconnect=False))
         assert "no such station" in caplog.text
+
+
+class TestCollectStalledFrame:
+    def test_idle_timeout_bounds_partial_frame(self):
+        client = SeedLink(host="localhost", port=18000, tls=False, idle_timeout=0.2)
+        client.protocol = Protocol.V4
+        client._streaming = True
+        ours, server = socket.socketpair()
+        client._sock = ours
+        try:
+            server.sendall(b"SE2D")  # header started, never finished
+            start = time.monotonic()
+            with pytest.raises(SeedLinkTimeout):
+                next(client.collect(reconnect=False))
+            assert time.monotonic() - start < 2
+            assert not client.is_connected
+        finally:
+            server.close()
 
 
 class TestCollectUndecodablePacket:

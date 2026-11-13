@@ -529,7 +529,11 @@ class AsyncSeedLink(_SeedLinkBase):
                     continue
 
                 try:
-                    frame = await self._recv_frame()
+                    # Bounded by idle_timeout so a frame stalled mid-read
+                    # can't block forever; the partial frame is unusable, so
+                    # a timeout here drops the connection.
+                    async with asyncio.timeout(self._idle_timeout or None):
+                        frame = await self._recv_frame()
                 except _UndecodablePacket as e:
                     logger.warning("Skipping undecodable packet seq=%s: %s", e.seqnum, e)
                     continue
@@ -538,6 +542,13 @@ class AsyncSeedLink(_SeedLinkBase):
                     if not reconnect:
                         raise
                     logger.warning("Connection to %s:%d lost: %s", self._host, self._port, e)
+                    continue
+                except TimeoutError:
+                    await self.close()
+                    message = f"Timed out reading a packet after {self._idle_timeout:.0f}s"
+                    if not reconnect:
+                        raise SeedLinkTimeout(message) from None
+                    logger.warning("Connection to %s:%d lost: %s", self._host, self._port, message)
                     continue
 
                 if frame is None:  # dial-up end of stream

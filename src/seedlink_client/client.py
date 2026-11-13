@@ -470,6 +470,7 @@ class SeedLink(_SeedLinkBase):
         generator get garbage-collected mid-stream) closes the connection,
         same as calling :meth:`close` directly.
         """
+        armed_sock = None  # socket given idle_timeout as its I/O deadline
         try:
             if not self._streaming:
                 self.negotiate()
@@ -483,6 +484,12 @@ class SeedLink(_SeedLinkBase):
                     last_data_time = time.monotonic()
                     next_keepalive = (time.monotonic() + self._keepalive) if self._keepalive else None
                     continue
+
+                # Without a socket timeout, a frame stalled mid-read would
+                # block forever; bound it by idle_timeout instead.
+                if self._timeout is None and self._idle_timeout and self._sock is not armed_sock:
+                    self._sock.settimeout(self._idle_timeout)
+                    armed_sock = self._sock
 
                 # Checked every pass, not just when nothing is readable, so
                 # traffic that isn't counted as activity (e.g. skipped
@@ -546,6 +553,9 @@ class SeedLink(_SeedLinkBase):
         except GeneratorExit:
             self.close()
             raise
+        finally:
+            if armed_sock is not None and armed_sock is self._sock:
+                armed_sock.settimeout(None)
 
     # -- INFO -----------------------------------------------------------------
 
