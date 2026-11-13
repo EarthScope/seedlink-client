@@ -22,20 +22,33 @@ class TestSaveState:
         )
 
     @pytest.mark.skipif(os.name == "nt", reason="POSIX file permissions only")
-    def test_permissions_follow_umask_not_mkstemp_default(self, tmp_path):
-        """mkstemp() itself creates the temp file mode 0600; save_state()
-        must widen that to ordinary umask-derived permissions before the
-        rename, like a plain open(), so another process/user can read a
-        state file meant to be shared (e.g. a monitoring tool)."""
+    def test_permissions_follow_umask(self, tmp_path):
+        """Like a plain open(), so another process/user can read a state
+        file meant to be shared (e.g. a monitoring tool)."""
         path = tmp_path / "state.txt"
-        original_umask = os.umask(0o022)
-        os.umask(original_umask)  # umask() sets while returning the old value
+        original_umask = os.umask(0o027)
         try:
             save_state(str(path), [Stream(station_id="IU_COLA", seqnum=5)])
             mode = stat.S_IMODE(path.stat().st_mode)
-            assert mode == 0o666 & ~original_umask
+            assert mode == 0o666 & ~0o027
         finally:
             os.umask(original_umask)
+
+    def test_does_not_change_process_umask(self, tmp_path, monkeypatch):
+        def no_umask(mask):
+            raise AssertionError("save_state() must not change the process umask")
+
+        monkeypatch.setattr(os, "umask", no_umask)
+        save_state(str(tmp_path / "state.txt"), [Stream(station_id="IU_COLA", seqnum=5)])
+
+    def test_fsynced_before_replace_and_no_temp_left(self, tmp_path, monkeypatch):
+        events = []
+        real_fsync, real_replace = os.fsync, os.replace
+        monkeypatch.setattr(os, "fsync", lambda fd: (events.append("fsync"), real_fsync(fd)))
+        monkeypatch.setattr(os, "replace", lambda a, b: (events.append("replace"), real_replace(a, b)))
+        save_state(str(tmp_path / "state.txt"), [Stream(station_id="IU_COLA", seqnum=5)])
+        assert events == ["fsync", "replace"]
+        assert [p.name for p in tmp_path.iterdir()] == ["state.txt"]
 
     def test_unset_sequence(self, tmp_path):
         path = tmp_path / "state.txt"

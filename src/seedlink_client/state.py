@@ -8,7 +8,7 @@ interchangeable with slinktool, slarchive, and other libslink-based tools.
 from __future__ import annotations
 
 import os
-import tempfile
+import secrets
 
 from .streams import Stream
 
@@ -24,22 +24,16 @@ def save_state(path: str, streams: list[Stream]) -> None:
 
     Sequence is decimal, or 'UNSET' if the stream has none yet.
 
-    Written via a temporary file in the same directory, then renamed into
-    place, so a crash or interrupt mid-write can't leave a truncated state
-    file behind. ``mkstemp()`` creates that temp file mode 0600 (owner
-    read/write only); it's given ordinary umask-derived permissions before
-    the rename, matching a plain ``open()``, since a state file is often
+    Written via a temporary file in the same directory, flushed to disk,
+    then renamed into place, so a crash or interrupt mid-write can't leave
+    a truncated state file behind. The temp file is created mode 0666 less
+    the umask, matching a plain ``open()``, since a state file is often
     meant to be read by another process or user (e.g. a monitoring tool,
     or a different service account resuming the same stream).
     """
     directory = os.path.dirname(path) or "."
-    fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".tmp-", suffix=".state")
+    fd, tmp_path = _create_temp(directory)
     try:
-        # os.umask() only sets while returning the old value, so reading it
-        # means setting-then-restoring; there's no separate "get" call.
-        umask = os.umask(0)
-        os.umask(umask)
-        os.chmod(tmp_path, 0o666 & ~umask)
         with os.fdopen(fd, "w") as f:
             f.write(_HEADER_V2 + "\n")
             for stream in streams:
@@ -49,6 +43,8 @@ def save_state(path: str, streams: list[Stream]) -> None:
                 if timestamp:
                     fields.append(timestamp)
                 f.write(" ".join(fields) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp_path, path)
     except BaseException:
         try:
@@ -56,6 +52,18 @@ def save_state(path: str, streams: list[Stream]) -> None:
         except OSError:
             pass
         raise
+
+
+def _create_temp(directory: str) -> tuple[int, str]:
+    """Exclusively create a uniquely named temp file in ``directory``,
+    letting the umask set its permissions."""
+    for _ in range(100):
+        tmp_path = os.path.join(directory, f".tmp-{secrets.token_hex(8)}.state")
+        try:
+            return os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666), tmp_path
+        except FileExistsError:
+            continue
+    raise FileExistsError(f"Could not create a temporary state file in {directory}")
 
 
 def load_state(path: str) -> dict[str, tuple[int | None, str | None]]:
