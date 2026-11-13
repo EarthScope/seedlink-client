@@ -11,6 +11,7 @@
 - Skip an undecodable v3 packet with a warning instead of reconnecting to it forever
 - Raise SeedLinkError with the server's message when an INFO request is rejected
 - Treat an idle timeout of 0 (-nt 0) as disabled, matching slinktool
+- Reset the idle timeout on keepalive/INFO replies too, matching libslink
 
 ## 0.2.0
 

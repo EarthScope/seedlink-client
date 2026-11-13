@@ -492,10 +492,9 @@ class AsyncSeedLink(_SeedLinkBase):
                     next_keepalive = (time.monotonic() + self._keepalive) if self._keepalive else None
                     continue
 
-                # Checked every pass, not just on a poll timeout -- a server
-                # sending only INFO/keepalive replies (no real data) would
-                # otherwise keep _ensure(1) resolving immediately and this
-                # timeout would never get a chance to fire.
+                # Checked every pass, not just on a poll timeout, so traffic
+                # that isn't counted as activity (e.g. skipped undecodable
+                # packets) can't defer it indefinitely.
                 now = time.monotonic()
                 if self._idle_timeout and now - last_data_time > self._idle_timeout:
                     logger.warning("No data for over %.0fs, reconnecting", self._idle_timeout)
@@ -558,10 +557,11 @@ class AsyncSeedLink(_SeedLinkBase):
                         raise SeedLinkError(message)
                     continue
 
-                if self._is_info_frame(frame):
-                    continue  # our own (or an interleaved) INFO reply; never yielded -- and
-                    # doesn't reset the idle-timeout clock, which tracks data, not keepalives
+                # Any received packet counts as activity, including keepalive
+                # replies, matching libslink's network timeout.
                 last_data_time = time.monotonic()
+                if self._is_info_frame(frame):
+                    continue  # our own (or an interleaved) INFO reply; never yielded
                 pkt = self._to_packet(frame)
                 self._update_stream_state(pkt)
                 yield pkt

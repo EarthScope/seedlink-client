@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import struct
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -437,22 +438,29 @@ class TestRecvAllTimeout:
 
 
 class TestCollectIdleTimeout:
-    """B7 regression: the idle timeout must fire even when the socket
-    keeps reporting data available, as long as none of it is real
-    (non-INFO) data -- see collect()'s idle-timeout comment."""
 
     def _info_frame(self) -> _RawFrame:
         return _RawFrame(station_id="", seqnum=None, payload_format=FORMAT_XML,
                           payload_subformat=SUBFORMAT_JSON_INFO, payload=b"<x/>",
                           info_continues=False)
 
-    def test_fires_despite_constant_info_traffic(self):
+    def test_info_traffic_resets_timer(self):
         client = make_client(Protocol.V4)
         client._streaming = True
         client._idle_timeout = 0.05
         client._poll_readable = lambda timeout: True
-        client._recv_frame = self._info_frame
-        with pytest.raises(SeedLinkTimeout, match="No data"):
+        count = 0
+
+        def recv_frame():
+            nonlocal count
+            count += 1
+            if count > 6:
+                raise SeedLinkError("stop")
+            time.sleep(0.02)  # 0.12s in all, past the idle timeout
+            return self._info_frame()
+
+        client._recv_frame = recv_frame
+        with pytest.raises(SeedLinkError, match="stop"):
             next(client.collect(reconnect=False))
 
     def test_zero_disables(self):

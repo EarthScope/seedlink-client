@@ -25,7 +25,6 @@ from seedlink_client.protocol import (
     SUBFORMAT_JSON_INFO,
     Protocol,
     SeedLinkError,
-    SeedLinkTimeout,
     _RawFrame,
     _UndecodablePacket,
 )
@@ -326,12 +325,7 @@ class TestNegotiatePipelined:
 
 
 class TestCollectIdleTimeout:
-    """B7 regression, async transport: see the sync client's
-    TestCollectIdleTimeout -- the idle timeout must fire even when
-    _ensure() keeps resolving immediately, as long as nothing but INFO
-    frames comes back."""
-
-    def test_fires_despite_constant_info_traffic(self):
+    def test_info_traffic_resets_timer(self):
         async def scenario():
             sl = AsyncSeedLink("127.0.0.1", 0)
             sl._writer = MagicMock()  # is_connected -> True; no real socket needed
@@ -346,14 +340,21 @@ class TestCollectIdleTimeout:
                                     payload_subformat=SUBFORMAT_JSON_INFO, payload=b"<x/>",
                                     info_continues=False)
 
+            count = 0
+
             async def recv_frame():
+                nonlocal count
+                count += 1
+                if count > 6:
+                    raise SeedLinkError("stop")
+                await asyncio.sleep(0.02)  # 0.12s in all, past the idle timeout
                 return info_frame
 
             sl._ensure = always_ready
             sl._recv_frame = recv_frame
             gen = sl.collect(reconnect=False)
             try:
-                with pytest.raises(SeedLinkTimeout, match="No data"):
+                with pytest.raises(SeedLinkError, match="stop"):
                     await gen.__anext__()
             finally:
                 await gen.aclose()

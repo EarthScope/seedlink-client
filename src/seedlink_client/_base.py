@@ -59,7 +59,8 @@ class _SeedLinkBase:
                     instead of negotiating automatically.
         keepalive:  Send an INFO ID heartbeat this often (seconds) while
                     streaming. None disables keepalives.
-        idle_timeout: Reconnect if no data arrives for this long (seconds).
+        idle_timeout: Reconnect if no packets, including keepalive replies,
+                    arrive for this long (seconds).
                     0 or None disables it.
         reconnect_delay: Seconds to wait between reconnection attempts.
         dialup:     Dial-up mode: fetch queued data then stop, instead of
