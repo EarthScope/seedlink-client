@@ -13,6 +13,7 @@ from seedlink_client._commands import (
     encode,
     plan_handshake,
     plan_negotiation,
+    station_v3,
     station_v4,
 )
 from seedlink_client.protocol import MAX_COMMAND_LEN, Protocol, SeedLinkError
@@ -51,6 +52,13 @@ class TestAuthMasking:
         with pytest.raises(SeedLinkError) as excinfo:
             encode(auth_jwt("x" * MAX_COMMAND_LEN))
         assert "xxxx" not in str(excinfo.value)
+
+
+class TestStationV3:
+    @pytest.mark.parametrize("station_id", ["KONO", "IU_", "_KONO"])
+    def test_missing_net_or_sta_rejected(self, station_id):
+        with pytest.raises(SeedLinkError, match="NET_STA"):
+            station_v3(station_id, expect_reply=True)
 
 
 class TestPlanHandshake:

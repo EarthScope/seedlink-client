@@ -19,6 +19,7 @@
 - Reject --auth without both a username and password instead of sending an empty one
 - Report CLI file errors (dumpfile, state file) as errors rather than tracebacks or silence
 - Treat only '*' and '?' as station ID wildcards, matching the protocol specification; '[' is now literal
+- Reject v3 station IDs that are not NET_STA, and accept 'STA NET' in the shell's v3 STATION command
 
 ## 0.2.0
 

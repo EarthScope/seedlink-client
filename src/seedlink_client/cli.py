@@ -532,14 +532,21 @@ class SeedLinkShell(cmd.Cmd):
             self.sl.protocol = Protocol.V4 if version.split(".", 1)[0] == "4" else Protocol.V3
 
     def do_station(self, arg: str) -> None:
-        "STATION <NET_STA>: select a station (v4) or 'STA NET' (v3)."
+        "STATION <NET_STA>: select a station; v3 also accepts 'STA NET'."
         if not arg:
             self._fail("STATION requires a station ID")
             return
-        if self.sl.protocol is Protocol.V4:
-            self._send(_commands.station_v4(arg))
-        else:
-            self._send(_commands.station_v3(arg, expect_reply=True))
+        try:
+            if self.sl.protocol is Protocol.V4:
+                command = _commands.station_v4(arg)
+            else:
+                parts = arg.split()
+                station_id = f"{parts[1]}_{parts[0]}" if len(parts) == 2 else arg
+                command = _commands.station_v3(station_id, expect_reply=True)
+        except SeedLinkError as e:
+            self._fail(str(e))
+            return
+        self._send(command)
         self._sent_station = True
 
     def complete_station(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:

@@ -191,6 +191,8 @@ def station_v4(station_id: str) -> Command:
 
 def station_v3(station_id: str, expect_reply: bool) -> Command:
     net, sta = _split_net_sta(station_id)
+    if not net or not sta:
+        raise SeedLinkError(f"v3 station ID must be NET_STA: {station_id!r}")
     return Command(
         f"STATION {sta} {net}", parse=parse_reply if expect_reply else None,
         role="station", stream_id=station_id,

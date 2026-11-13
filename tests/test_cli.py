@@ -276,6 +276,20 @@ class TestSeedLinkShell:
         shell.do_station("")
         assert shell.had_error
 
+    def test_v3_station_accepts_sta_net_form(self):
+        shell, sl = make_shell()
+        sl.protocol = Protocol.V3
+        shell.do_station("COLA IU")
+        assert sl._send_command.call_args[0][0].text == "STATION COLA IU"
+        assert not shell.had_error
+
+    def test_v3_station_without_network_fails_cleanly(self):
+        shell, sl = make_shell()
+        sl.protocol = Protocol.V3
+        shell.do_station("KONO")
+        assert shell.had_error
+        sl._send_command.assert_not_called()
+
     def test_bye_disconnects_and_stops(self):
         shell, sl = make_shell()
         stop = shell.onecmd(shell.precmd("bye"))
