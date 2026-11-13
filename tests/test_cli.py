@@ -12,6 +12,7 @@ from seedlink_client.cli import (
     SeedLinkShell,
     _build_parser,
     _configure_streams,
+    _recover_state,
     _fmt_info,
     _normalize_stations,
     _parse_auth,
@@ -152,6 +153,7 @@ class TestMainFileErrors:
         sl.recover_state.side_effect = PermissionError("Permission denied")
         rc, _ = self._run_main(monkeypatch, ["-x", str(tmp_path / "state")], sl)
         assert rc == 1
+        sl.connect.assert_not_called()
         sl.collect.assert_not_called()
         assert "Error:" in capsys.readouterr().err
 
@@ -165,6 +167,7 @@ class TestMainFileErrors:
         sl.recover_state.side_effect = load_state
         rc, _ = self._run_main(monkeypatch, ["-S", "IU_COLA", "-x", str(path)], sl)
         assert rc == 1
+        sl.connect.assert_not_called()
         sl.collect.assert_not_called()
         sl.add_streamlist.assert_not_called()
         assert "Error: Not a valid state file" in capsys.readouterr().err
@@ -174,7 +177,14 @@ class TestMainFileErrors:
         sl = MagicMock()
         sl.recover_state.side_effect = FileNotFoundError
         args = _build_parser().parse_args(["-x", "nonexistent.state"])
-        _configure_streams(sl, args)  # no exception
+        _recover_state(sl, args)  # no exception
+
+    def test_statefile_not_read_for_info(self, monkeypatch, tmp_path):
+        sl = MagicMock()
+        sl.info_dict.return_value = {}
+        rc, _ = self._run_main(monkeypatch, ["-I", "-x", str(tmp_path / "state")], sl)
+        assert rc == 0
+        sl.recover_state.assert_not_called()
 
 
 def make_shell(details: int = 0, unpack: bool = False) -> tuple[SeedLinkShell, MagicMock]:

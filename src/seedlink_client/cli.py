@@ -295,16 +295,16 @@ def _print_info(result: dict[str, Any], level: str, protocol: Protocol, verbose:
 # ---------------------------------------------------------------------------
 
 
+def _recover_state(sl: SeedLink, args) -> None:
+    try:
+        sl.recover_state(args.statefile)
+    except FileNotFoundError:
+        pass  # no state file yet
+    except ValueError as e:
+        raise SeedLinkError(str(e)) from e
+
+
 def _configure_streams(sl: SeedLink, args) -> None:
-    # Recovered first so a bad state file leaves no streams, and therefore
-    # isn't overwritten by the save on exit.
-    if args.statefile:
-        try:
-            sl.recover_state(args.statefile)
-        except FileNotFoundError:
-            pass  # no state file yet
-        except ValueError as e:
-            raise SeedLinkError(str(e)) from e
     if args.streams:
         sl.add_streamlist(args.streams, default_selectors=args.selectors)
     elif args.list_file:
@@ -842,6 +842,15 @@ def main() -> int:
         info_level = "STREAMS"
     elif args.connection_list:
         info_level = "CONNECTIONS"
+
+    # Read before connecting, and outside the save on exit below, so a bad
+    # state file is reported without server contact and isn't overwritten.
+    if args.statefile and not info_level:
+        try:
+            _recover_state(sl, args)
+        except (SeedLinkError, OSError) as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
 
     try:
         # -c drives the handshake by hand -- HELLO/SLPROTO are the operator's
