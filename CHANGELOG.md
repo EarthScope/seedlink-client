@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Require pymseed >=1.0.1,<2
 - Log connection loss and pending reconnect during streaming
 - Track and resume per-station sequences for wildcard station IDs in the state file
 - Pipeline v4 STATION/SELECT/DATA negotiation commands instead of waiting for each reply
