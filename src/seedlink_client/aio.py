@@ -295,7 +295,7 @@ class AsyncSeedLink(_SeedLinkBase):
         if self._writer is None:
             raise SeedLinkError("Not connected")
         wire = _commands.encode(cmd)
-        logger.debug("--> %s", cmd.text)
+        logger.debug("--> %s", cmd.display_text)
         try:
             self._writer.write(wire)
             await self._writer.drain()
@@ -319,7 +319,7 @@ class AsyncSeedLink(_SeedLinkBase):
             window = cmds[i:i + _commands.PIPELINE_WINDOW]
             wire = b"".join(_commands.encode(cmd) for cmd in window)
             for cmd in window:
-                logger.debug("--> %s", cmd.text)
+                logger.debug("--> %s", cmd.display_text)
             try:
                 self._writer.write(wire)
                 await self._writer.drain()

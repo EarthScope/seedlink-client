@@ -252,6 +252,18 @@ class TestSendCommand:
             client._send_command(auth_jwt(token))
 
 
+class TestAuthLogging:
+    def test_debug_log_masks_credentials(self, caplog):
+        from seedlink_client._commands import auth_userpass
+
+        client = make_client(Protocol.V4)
+        client._sock.recv_into = MagicMock(side_effect=_mock_recv_stream(b"OK\r\n"))
+        with caplog.at_level("DEBUG", logger="seedlink_client.client"):
+            client._send_command(auth_userpass("alice", "s3cret"))
+        assert "AUTH USERPASS alice ****" in caplog.text
+        assert "s3cret" not in caplog.text
+
+
 class TestNegotiateV3MultiStationSkip:
     """A rejected v3 STATION should skip that stream's SELECT/DATA but not abort."""
 

@@ -14,6 +14,7 @@
 - Reset the idle timeout on keepalive/INFO replies too, matching libslink
 - Bound reading a partly received packet by the idle timeout so a stalled frame can't hang collect()
 - Close the connection when negotiate() fails rather than leave a partial selection on the server
+- Mask AUTH passwords and tokens in debug logs and error messages
 
 ## 0.2.0
 

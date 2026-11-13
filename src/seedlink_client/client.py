@@ -283,7 +283,7 @@ class SeedLink(_SeedLinkBase):
         if self._sock is None:
             raise SeedLinkError("Not connected")
         wire = _commands.encode(cmd)
-        logger.debug("--> %s", cmd.text)
+        logger.debug("--> %s", cmd.display_text)
         try:
             self._sock.sendall(wire)
         except OSError as e:
@@ -306,7 +306,7 @@ class SeedLink(_SeedLinkBase):
             window = cmds[i:i + _commands.PIPELINE_WINDOW]
             wire = b"".join(_commands.encode(cmd) for cmd in window)
             for cmd in window:
-                logger.debug("--> %s", cmd.text)
+                logger.debug("--> %s", cmd.display_text)
             try:
                 self._sock.sendall(wire)
             except OSError as e:

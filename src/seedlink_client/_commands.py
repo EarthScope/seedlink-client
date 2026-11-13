@@ -65,6 +65,8 @@ class Command:
                     for anything sent outside a negotiation plan.
         stream_id:  The station ID this command belongs to, for negotiation
                     commands; None otherwise.
+        log_text:   Text to log or report in place of ``text``, e.g. with
+                    credentials masked; None to use ``text``.
     """
 
     text: str
@@ -72,17 +74,23 @@ class Command:
     terminator: bytes = b"\r\n"
     role: Role = "generic"
     stream_id: str | None = None
+    log_text: str | None = None
+
+    @property
+    def display_text(self) -> str:
+        """The command as it may be logged or shown in an error message."""
+        return self.log_text if self.log_text is not None else self.text
 
 
 def encode(cmd: Command) -> bytes:
     """Return ``cmd``'s wire bytes, rejecting a line over MAX_COMMAND_LEN or
     one with non-ASCII or control characters (e.g. an embedded CR/LF)."""
     if not (cmd.text.isascii() and cmd.text.isprintable()):
-        raise SeedLinkError(f"Command contains non-ASCII or control characters: {cmd.text!r}")
+        raise SeedLinkError(f"Command contains non-ASCII or control characters: {cmd.display_text!r}")
     wire = cmd.text.encode("ascii") + cmd.terminator
     if len(wire) > MAX_COMMAND_LEN:
         raise SeedLinkError(
-            f"Command exceeds the {MAX_COMMAND_LEN}-byte command-line limit: {cmd.text!r}"
+            f"Command exceeds the {MAX_COMMAND_LEN}-byte command-line limit: {cmd.display_text!r}"
         )
     return wire
 
@@ -140,11 +148,12 @@ def useragent(client_name: str | None, client_version: str | None) -> Command:
 def auth_userpass(username: str, password: str) -> Command:
     if " " in username or " " in password:
         raise SeedLinkError("AUTH USERPASS username/password must not contain spaces")
-    return Command(f"AUTH USERPASS {username} {password}", parse=_expect_auth_ok)
+    return Command(f"AUTH USERPASS {username} {password}", parse=_expect_auth_ok,
+                   log_text=f"AUTH USERPASS {username} ****")
 
 
 def auth_jwt(token: str) -> Command:
-    return Command(f"AUTH JWT {token}", parse=_expect_auth_ok)
+    return Command(f"AUTH JWT {token}", parse=_expect_auth_ok, log_text="AUTH JWT ****")
 
 
 def batch() -> Command:

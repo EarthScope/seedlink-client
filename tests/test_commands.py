@@ -8,6 +8,8 @@ import pytest
 
 from seedlink_client._commands import (
     NegotiationWalk,
+    auth_jwt,
+    auth_userpass,
     encode,
     plan_handshake,
     plan_negotiation,
@@ -33,6 +35,22 @@ class TestEncode:
     def test_embedded_line_break_rejected(self):
         with pytest.raises(SeedLinkError, match="control characters"):
             encode(station_v4("IU_KONO\r\nBYE"))
+
+
+class TestAuthMasking:
+    def test_userpass_password_masked(self):
+        cmd = auth_userpass("alice", "s3cret")
+        assert cmd.text == "AUTH USERPASS alice s3cret"
+        assert cmd.display_text == "AUTH USERPASS alice ****"
+
+    def test_jwt_token_masked(self):
+        cmd = auth_jwt("eyJhbGciOi.payload.sig")
+        assert "eyJ" not in cmd.display_text
+
+    def test_error_message_masked(self):
+        with pytest.raises(SeedLinkError) as excinfo:
+            encode(auth_jwt("x" * MAX_COMMAND_LEN))
+        assert "xxxx" not in str(excinfo.value)
 
 
 class TestPlanHandshake:
