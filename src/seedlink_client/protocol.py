@@ -130,6 +130,19 @@ class SeedLinkAuthError(SeedLinkError):
     """
 
 
+class _UndecodablePacket(SeedLinkError):
+    """A complete v3 packet whose payload could not be decoded.
+
+    Framing is intact (the record length was detected), so the transport
+    can skip just this packet rather than drop the connection and resume
+    at the same sequence number again.
+    """
+
+    def __init__(self, message: str, seqnum: int | None):
+        super().__init__(message)
+        self.seqnum = seqnum
+
+
 @dataclass
 class SeedLinkResponse:
     """OK or ERROR status response from the server.
@@ -304,7 +317,10 @@ def decode_frame_v3(header: HeaderV3, payload: bytes) -> _RawFrame:
             payload_subformat=SUBFORMAT_JSON_INFO, payload=text.encode("utf-8"),
             info_continues=header.info_continues,
         )
-    record = mseed.parse_record(payload)
+    try:
+        record = mseed.parse_record(payload)
+    except SeedLinkError as e:
+        raise _UndecodablePacket(str(e), header.seqnum) from e
     return _RawFrame(
         station_id=mseed.station_id(record), seqnum=header.seqnum,
         payload_format=FORMAT_MSEED2, payload_subformat="D", payload=payload,

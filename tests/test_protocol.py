@@ -13,7 +13,9 @@ from seedlink_client.protocol import (
     SeedLinkError,
     SeedLinkPacket,
     StreamEvent,
+    _UndecodablePacket,
     classify_stream_prefix,
+    decode_frame_v3,
     decode_frame_v4_body,
     is_packet_signature,
     parse_header_v3,
@@ -52,6 +54,14 @@ class TestParseHeaderV3:
     def test_bad_hex_sequence_raises(self):
         with pytest.raises(SeedLinkError):
             parse_header_v3(b"SL!!!!!!")
+
+
+class TestDecodeFrameV3:
+    def test_unparsable_record_raises_undecodable_with_seqnum(self):
+        header = parse_header_v3(b"SL00002A")
+        with pytest.raises(_UndecodablePacket) as excinfo:
+            decode_frame_v3(header, b"\x00" * 512)
+        assert excinfo.value.seqnum == 0x2A
 
 
 class TestParseHeaderV4:

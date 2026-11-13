@@ -45,6 +45,7 @@ from .protocol import (
     SeedLinkTimeout,
     StreamEvent,
     _RawFrame,
+    _UndecodablePacket,
     classify_stream_prefix,
     decode_frame_v3,
     decode_frame_v4_body,
@@ -530,6 +531,9 @@ class AsyncSeedLink(_SeedLinkBase):
 
                 try:
                     frame = await self._recv_frame()
+                except _UndecodablePacket as e:
+                    logger.warning("Skipping undecodable packet seq=%s: %s", e.seqnum, e)
+                    continue
                 except SeedLinkError as e:
                     await self.close()
                     if not reconnect:

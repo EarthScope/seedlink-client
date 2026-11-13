@@ -19,6 +19,7 @@ from seedlink_client.protocol import (
     SeedLinkPacket,
     SeedLinkTimeout,
     _RawFrame,
+    _UndecodablePacket,
 )
 from seedlink_client.streams import Stream
 
@@ -512,6 +513,30 @@ class TestCollectJsonError:
             with pytest.raises(SeedLinkError, match="no such station"):
                 next(client.collect(reconnect=False))
         assert "no such station" in caplog.text
+
+
+class TestCollectUndecodablePacket:
+    def test_skipped_without_dropping_connection(self, caplog):
+        client = make_client(Protocol.V3)
+        client._streaming = True
+        client._poll_readable = lambda timeout: True
+        data_frame = _RawFrame(station_id="IU_KONO", seqnum=8, payload_format="2",
+                                payload_subformat="D", payload=b"x", info_continues=False)
+        frames = iter([_UndecodablePacket("bad record", 7), data_frame])
+
+        def recv_frame():
+            item = next(frames)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        client._recv_frame = recv_frame
+        gen = client.collect(reconnect=False)
+        with caplog.at_level("WARNING"):
+            pkt = next(gen)
+        assert pkt.seqnum == 8
+        assert client.is_connected
+        assert "Skipping undecodable packet seq=7" in caplog.text
 
 
 class TestFromServerString:

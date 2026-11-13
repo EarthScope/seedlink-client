@@ -8,6 +8,7 @@
 - Wrap the v3 DATA/FETCH resume sequence number at 24 bits, matching libslink
 - Raise SeedLinkError on non-ASCII v4 header bytes so collect() reconnects instead of crashing
 - Reject commands containing non-ASCII or control characters, preventing CR/LF command injection
+- Skip an undecodable v3 packet with a warning instead of reconnecting to it forever
 
 ## 0.2.0
 

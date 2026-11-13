@@ -26,6 +26,7 @@ from seedlink_client.protocol import (
     SeedLinkError,
     SeedLinkTimeout,
     _RawFrame,
+    _UndecodablePacket,
 )
 
 
@@ -366,6 +367,41 @@ class TestCollectJsonError:
                     with pytest.raises(SeedLinkError, match="no such station"):
                         await gen.__anext__()
                 assert "no such station" in caplog.text
+            finally:
+                await gen.aclose()
+
+        run(scenario())
+
+
+class TestCollectUndecodablePacket:
+    def test_skipped_without_dropping_connection(self, caplog):
+        async def scenario():
+            sl = AsyncSeedLink("127.0.0.1", 0)
+            sl._writer = MagicMock()  # is_connected -> True; no real socket needed
+            sl._writer.wait_closed = AsyncMock()
+            sl._streaming = True
+            data_frame = _RawFrame(station_id="IU_KONO", seqnum=8, payload_format="2",
+                                    payload_subformat="D", payload=b"x", info_continues=False)
+            frames = iter([_UndecodablePacket("bad record", 7), data_frame])
+
+            async def always_ready(n):
+                return None
+
+            async def recv_frame():
+                item = next(frames)
+                if isinstance(item, Exception):
+                    raise item
+                return item
+
+            sl._ensure = always_ready
+            sl._recv_frame = recv_frame
+            gen = sl.collect(reconnect=False)
+            try:
+                with caplog.at_level("WARNING"):
+                    pkt = await gen.__anext__()
+                assert pkt.seqnum == 8
+                assert sl.is_connected
+                assert "Skipping undecodable packet seq=7" in caplog.text
             finally:
                 await gen.aclose()
 
