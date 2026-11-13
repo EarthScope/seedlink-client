@@ -29,6 +29,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 from .protocol import (
+    MAX_COMMAND_LEN,
     Protocol,
     SeedLinkAuthError,
     SeedLinkError,
@@ -42,6 +43,10 @@ from .time_utils import parse_timestring, to_comma_timestring, to_iso_timestring
 logger = logging.getLogger(__name__)
 
 Role = Literal["generic", "station", "select", "data", "end"]
+
+# Maximum v4 commands sent ahead of their replies, bounding unread replies so
+# neither side stalls on a full socket buffer with a long station list.
+PIPELINE_WINDOW = 64
 
 
 @dataclass(frozen=True)
@@ -67,6 +72,16 @@ class Command:
     terminator: bytes = b"\r\n"
     role: Role = "generic"
     stream_id: str | None = None
+
+
+def encode(cmd: Command) -> bytes:
+    """Return ``cmd``'s wire bytes, rejecting a line over MAX_COMMAND_LEN."""
+    wire = cmd.text.encode("ascii") + cmd.terminator
+    if len(wire) > MAX_COMMAND_LEN:
+        raise SeedLinkError(
+            f"Command exceeds the {MAX_COMMAND_LEN}-byte command-line limit: {cmd.text!r}"
+        )
+    return wire
 
 
 def _expect_ok(line: str) -> SeedLinkResponse:
@@ -350,8 +365,8 @@ def plan_negotiation(
     Three shapes, chosen by ``protocol`` and ``multistation``:
 
     - v4: per stream, STATION then one SELECT per selector then DATA;
-      finally END or ENDFETCH. STATION/SELECT/DATA errors are fatal
-      (raised immediately by the transport as it reads each reply).
+      finally END or ENDFETCH. The transport pipelines STATION/SELECT/DATA
+      and sends END only once every reply is OK; any rejection is fatal.
     - v3 multi-station: per stream, STATION then SELECT(s) then
       DATA/FETCH/TIME; finally END. A rejected STATION means that
       stream's SELECT/DATA commands are skipped (the transport's

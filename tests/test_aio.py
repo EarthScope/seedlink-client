@@ -229,6 +229,76 @@ class TestStreaming:
         run(scenario())
 
 
+class TestNegotiatePipelined:
+    async def _handshake(self, reader, writer):
+        lines = _LineReader(reader)
+        assert await lines.read_line() == "HELLO"
+        writer.write(b"SeedLink v4.0 (test) :: SLPROTO:4.0\r\nTest Server\r\n")
+        await writer.drain()
+        assert await lines.read_line() == "SLPROTO 4.0"
+        writer.write(b"OK\r\n")
+        await writer.drain()
+        assert (await lines.read_line()).startswith("USERAGENT")
+        writer.write(b"OK\r\n")
+        await writer.drain()
+        return lines
+
+    def test_commands_arrive_before_any_reply(self):
+        async def scenario():
+            received = []
+            done = asyncio.Event()
+
+            async def handle(reader, writer):
+                lines = await self._handshake(reader, writer)
+                # No reply is sent until all three commands have arrived.
+                for _ in range(3):
+                    received.append(await lines.read_line())
+                writer.write(b"OK\r\n" * 3)
+                await writer.drain()
+                received.append(await lines.read_line())
+                done.set()
+                writer.close()
+
+            server, port = await _serve_once(handle)
+            async with AsyncSeedLink("127.0.0.1", port, timeout=5) as sl:
+                sl.add_stream("IU_KONO", "B_H_Z")
+                await sl.negotiate()
+                assert sl.is_streaming
+                await asyncio.wait_for(done.wait(), timeout=5)
+            server.close()
+            assert received == ["STATION IU_KONO", "SELECT B_H_Z", "DATA", "END"]
+
+        run(scenario())
+
+    def test_rejection_raises_without_end(self):
+        async def scenario():
+            received = []
+
+            async def handle(reader, writer):
+                lines = await self._handshake(reader, writer)
+                for _ in range(2):
+                    received.append(await lines.read_line())
+                writer.write(b"ERROR ARGUMENTS bad station\r\nOK\r\n")
+                await writer.drain()
+                try:
+                    received.append(await asyncio.wait_for(lines.read_line(), timeout=0.3))
+                except (TimeoutError, asyncio.IncompleteReadError):
+                    pass
+                writer.close()
+
+            server, port = await _serve_once(handle)
+            async with AsyncSeedLink("127.0.0.1", port, timeout=5) as sl:
+                sl.add_stream("IU_KONO")
+                with pytest.raises(SeedLinkError, match="bad station"):
+                    await sl.negotiate()
+                assert not sl.is_streaming
+                await asyncio.sleep(0.35)
+            server.close()
+            assert received == ["STATION IU_KONO", "DATA"]
+
+        run(scenario())
+
+
 class TestCollectIdleTimeout:
     """B7 regression, async transport: see the sync client's
     TestCollectIdleTimeout -- the idle timeout must fire even when

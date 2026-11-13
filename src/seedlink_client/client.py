@@ -19,7 +19,6 @@ from .protocol import (
     FORMAT_XML,
     HEADSIZE_V3,
     HEADSIZE_V4,
-    MAX_COMMAND_LEN,
     MAX_RECORD_LEN,
     MIN_PAYLOAD_DETECT,
     Protocol,
@@ -282,11 +281,7 @@ class SeedLink(_SeedLinkBase):
     def _send_command(self, cmd: Command) -> Any:
         if self._sock is None:
             raise SeedLinkError("Not connected")
-        wire = cmd.text.encode("ascii") + cmd.terminator
-        if len(wire) > MAX_COMMAND_LEN:
-            raise SeedLinkError(
-                f"Command exceeds the {MAX_COMMAND_LEN}-byte command-line limit: {cmd.text!r}"
-            )
+        wire = _commands.encode(cmd)
         logger.debug("--> %s", cmd.text)
         try:
             self._sock.sendall(wire)
@@ -298,6 +293,39 @@ class SeedLink(_SeedLinkBase):
         line = self._read_line()
         logger.debug("<-- %s", line)
         return cmd.parse(line)
+
+    def _send_pipelined(self, cmds: list[Command]) -> None:
+        """Send commands that each expect a reply without waiting for each
+        reply, up to PIPELINE_WINDOW at a time, then read the replies in
+        order. The first rejection is raised once its window's replies are read.
+        """
+        if self._sock is None:
+            raise SeedLinkError("Not connected")
+        for i in range(0, len(cmds), _commands.PIPELINE_WINDOW):
+            window = cmds[i:i + _commands.PIPELINE_WINDOW]
+            wire = b"".join(_commands.encode(cmd) for cmd in window)
+            for cmd in window:
+                logger.debug("--> %s", cmd.text)
+            try:
+                self._sock.sendall(wire)
+            except OSError as e:
+                self.close()
+                raise SeedLinkError(f"send failed: {e}") from e
+            error: SeedLinkError | None = None
+            for cmd in window:
+                try:
+                    line = self._read_line()
+                except SeedLinkError:
+                    if error is None:
+                        raise
+                    raise error from None  # report the rejection, not its aftermath
+                logger.debug("<-- %s", line)
+                try:
+                    cmd.parse(line)
+                except SeedLinkError as e:
+                    error = error or e
+            if error is not None:
+                raise error
 
     # -- Packet framing -----------------------------------------------------
 
@@ -375,6 +403,8 @@ class SeedLink(_SeedLinkBase):
     def negotiate(self) -> None:
         """Select streams and start streaming: STATION/SELECT/DATA, then END.
 
+        v4 commands are pipelined, with END sent only once all are accepted.
+
         Raises:
             SeedLinkError: if no station was accepted (v3 multi-station), or
                 (v4) if any STATION/SELECT/DATA command was rejected.
@@ -386,13 +416,17 @@ class SeedLink(_SeedLinkBase):
             resume=True, lastpkttime=True, batch_active=self._batch_active,
             start_time=self._start_time, end_time=self._end_time,
         )
-        walk = _commands.NegotiationWalk()
-        for cmd in plan:
-            if not walk.should_send(cmd):
-                continue
-            resp = self._send_command(cmd)
-            walk.record(cmd, resp)
-        walk.finish()
+        if self.protocol is Protocol.V4:
+            self._send_pipelined(plan[:-1])
+            self._send_command(plan[-1])
+        else:
+            walk = _commands.NegotiationWalk()
+            for cmd in plan:
+                if not walk.should_send(cmd):
+                    continue
+                resp = self._send_command(cmd)
+                walk.record(cmd, resp)
+            walk.finish()
         self._streaming = True
 
     def _reconnect_after_delay(self) -> None:

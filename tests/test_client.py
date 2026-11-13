@@ -305,6 +305,71 @@ class TestNegotiateV4HardFail:
             client.negotiate()
 
 
+class TestNegotiateV4Pipelined:
+    """v4 STATION/SELECT/DATA go out without waiting for each reply; END
+    follows only once every reply is OK."""
+
+    def test_commands_sent_before_replies_read(self):
+        client = make_client(Protocol.V4)
+        client._streams = [
+            Stream(station_id="GE_WLF", selectors=["B_H_Z"]),
+            Stream(station_id="IU_KONO"),
+        ]
+        events = []
+        client._sock.sendall = MagicMock(side_effect=lambda data: events.append(("send", data)))
+        recv = _mock_recv_stream(b"OK\r\n" * 5)
+
+        def _recv_into(buf):
+            events.append(("recv", None))
+            return recv(buf)
+
+        client._sock.recv_into = MagicMock(side_effect=_recv_into)
+        client.negotiate()
+        assert events[0] == (
+            "send",
+            b"STATION GE_WLF\rSELECT B_H_Z\rDATA\rSTATION IU_KONO\rDATA\r",
+        )
+        assert events[-1] == ("send", b"END\r\n")
+        assert all(kind == "recv" for kind, _ in events[1:-1])
+        assert client.is_streaming
+
+    def test_rejection_reads_remaining_replies_and_skips_end(self):
+        client = make_client(Protocol.V4)
+        client._streams = [Stream(station_id="IU_KONO", selectors=["B_H_?"])]
+        client._sock.recv_into = MagicMock(side_effect=_mock_recv_stream(
+            b"ERROR ARGUMENTS bad station\r\nOK\r\nOK\r\n"
+        ))
+        with pytest.raises(SeedLinkError, match="bad station"):
+            client.negotiate()
+        assert client._sock.sendall.call_count == 1
+        assert client._recv_start == client._recv_end  # all replies consumed
+        assert not client.is_streaming
+
+    def test_rejection_reported_when_connection_then_closes(self):
+        client = make_client(Protocol.V4)
+        client._streams = [Stream(station_id="IU_KONO", selectors=["B_H_?"])]
+        client._sock.recv_into = MagicMock(side_effect=_mock_recv_stream(
+            b"ERROR ARGUMENTS bad station\r\n"
+        ))
+        with pytest.raises(SeedLinkError, match="bad station"):
+            client.negotiate()
+
+    def test_long_plan_sent_in_windows(self, monkeypatch):
+        from seedlink_client import _commands
+
+        monkeypatch.setattr(_commands, "PIPELINE_WINDOW", 2)
+        client = make_client(Protocol.V4)
+        client._streams = [Stream(station_id="IU_KONO"), Stream(station_id="GE_WLF")]
+        client._sock.recv_into = MagicMock(side_effect=_mock_recv_stream(b"OK\r\n" * 4))
+        client.negotiate()
+        sent = [call.args[0] for call in client._sock.sendall.call_args_list]
+        assert sent == [
+            b"STATION GE_WLF\rDATA\r",
+            b"STATION IU_KONO\rDATA\r",
+            b"END\r\n",
+        ]
+
+
 class TestConnectHandshakeFlag:
     def test_handshake_false_skips_hello(self, monkeypatch):
         client = SeedLink(host="localhost", port=18000, tls=False)

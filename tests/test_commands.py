@@ -6,9 +6,25 @@ from datetime import datetime, timezone
 
 import pytest
 
-from seedlink_client._commands import NegotiationWalk, plan_handshake, plan_negotiation
-from seedlink_client.protocol import Protocol, SeedLinkError
+from seedlink_client._commands import (
+    NegotiationWalk,
+    encode,
+    plan_handshake,
+    plan_negotiation,
+    station_v4,
+)
+from seedlink_client.protocol import MAX_COMMAND_LEN, Protocol, SeedLinkError
 from seedlink_client.streams import Stream
+
+
+class TestEncode:
+    def test_terminators(self):
+        assert encode(station_v4("IU_KONO")) == b"STATION IU_KONO\r"
+        assert encode(plan_handshake(Protocol.V4, {}, None, None, None, False)[0]) == b"SLPROTO 4.0\r\n"
+
+    def test_over_length_rejected(self):
+        with pytest.raises(SeedLinkError, match="command-line limit"):
+            encode(station_v4("X" * MAX_COMMAND_LEN))
 
 
 class TestPlanHandshake:
