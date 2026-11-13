@@ -148,9 +148,10 @@ class TestNegotiationWalk:
     drive; see client.SeedLink.negotiate() for how it's used."""
 
     @staticmethod
-    def _walk_plan(streams, replies, multistation=True):
+    def _walk_plan(streams, replies, multistation=True, invalid=None):
         """Drive a v3 plan through a walk, replying OK except as given in
-        ``replies`` (command text -> message); returns the commands sent."""
+        ``replies`` (command text -> ERROR message) or ``invalid`` (command
+        text -> reply status); returns the commands sent."""
         from seedlink_client.protocol import SeedLinkResponse
 
         walk = NegotiationWalk()
@@ -161,8 +162,9 @@ class TestNegotiationWalk:
                 continue
             sent.append(cmd.text)
             msg = replies.get(cmd.text)
+            status = (invalid or {}).get(cmd.text) or ("ERROR" if msg else "OK")
             resp = None if cmd.parse is None else SeedLinkResponse(
-                status="ERROR" if msg else "OK", code=None, message=msg or "")
+                status=status, code=None, message=msg or "")
             walk.record(cmd, resp)
         walk.finish()
         return sent
@@ -173,6 +175,11 @@ class TestNegotiationWalk:
             sent = self._walk_plan(streams, {"SELECT BHN": "bad selector"})
         assert "SELECT rejected for IU_KONO: bad selector" in caplog.text
         assert sent[-2:] == ["DATA", "END"]
+
+    def test_invalid_reply_fatal(self):
+        streams = [Stream(station_id="IU_KONO", selectors=["BHZ"])]
+        with pytest.raises(SeedLinkError, match="Invalid response to SELECT BHZ"):
+            self._walk_plan(streams, {}, invalid={"SELECT BHZ": "SLINFO"})
 
     def test_all_selects_rejected_fatal(self):
         streams = [Stream(station_id="GE_WLF"),

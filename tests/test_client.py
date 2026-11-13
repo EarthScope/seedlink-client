@@ -387,6 +387,15 @@ class TestNegotiateV4Pipelined:
         assert client._sock.sendall.call_args_list[-1].args[0] == b"END\r\n"
         assert "continuing via wildcard" in caplog.text
 
+    def test_invalid_reply_for_station_covered_by_wildcard_fatal(self):
+        client = make_client(Protocol.V4)
+        client._streams = [Stream(station_id="IU_*"), Stream(station_id="IU_KONO")]
+        client._sock.recv_into = MagicMock(side_effect=_mock_recv_stream(
+            b"GARBAGE\r\nOK\r\nOK\r\nOK\r\n"
+        ))
+        with pytest.raises(SeedLinkError, match="GARBAGE"):
+            client.negotiate()
+
     def test_rejection_of_wildcard_still_fatal(self):
         client = make_client(Protocol.V4)
         client._streams = [Stream(station_id="IU_*"), Stream(station_id="IU_KONO")]

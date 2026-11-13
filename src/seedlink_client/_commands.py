@@ -68,7 +68,7 @@ class Command:
                     commands; None otherwise.
         log_text:   Text to log or report in place of ``text``, e.g. with
                     credentials masked; None to use ``text``.
-        tolerated:  Whether a rejection is logged rather than fatal: a v4
+        tolerated:  Whether an ERROR reply is logged rather than fatal: a v4
                     command for a station also covered by a wildcard.
     """
 
@@ -298,10 +298,10 @@ class NegotiationWalk:
     Both transports send commands themselves (blocking vs. ``await``ed I/O)
     and call back into this one command at a time: :meth:`should_send` first
     (a rejected v3 STATION means its stream's SELECT/DATA are skipped, not
-    sent), then :meth:`record` with the reply once sent. :meth:`should_send`
-    raises before a stream's DATA/FETCH/TIME if none of its selectors were
-    accepted, and :meth:`finish` raises if no station was ever accepted
-    (v3 multi-station).
+    sent), then :meth:`record` with the reply once sent, which raises on a
+    reply that is neither OK nor ERROR. :meth:`should_send` raises before a
+    stream's DATA/FETCH/TIME if none of its selectors were accepted, and
+    :meth:`finish` raises if no station was ever accepted (v3 multi-station).
     """
 
     seen_station_role: bool = field(default=False, init=False)
@@ -325,6 +325,8 @@ class NegotiationWalk:
         return True
 
     def record(self, cmd: Command, resp: SeedLinkResponse | None) -> None:
+        if resp is not None and resp.status not in ("OK", "ERROR"):
+            raise SeedLinkError(f"Invalid response to {cmd.display_text}: {resp.message!r}")
         if cmd.role == "station":
             if resp is not None and not resp:
                 logger.warning("Station %s rejected: %s", cmd.stream_id, resp.message)

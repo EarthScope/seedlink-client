@@ -135,3 +135,20 @@ class TestLoadState:
         path.write_text("#V2 StationID  Sequence  [Timestamp]\nIU_COLA notanumber\nGE_WLF 5\n")
         loaded = load_state(str(path))
         assert loaded == {"GE_WLF": (5, None)}
+
+    def test_binary_file_rejected(self, tmp_path):
+        path = tmp_path / "state.txt"
+        path.write_bytes(b"\x00\x01\x80\xffabc")
+        with pytest.raises(ValueError, match="Not a valid state file"):
+            load_state(str(path))
+
+    def test_non_state_text_file_rejected(self, tmp_path):
+        path = tmp_path / "state.txt"
+        path.write_text("this is not\na state file\n")
+        with pytest.raises(ValueError, match="no state entries"):
+            load_state(str(path))
+
+    def test_empty_file_accepted(self, tmp_path):
+        path = tmp_path / "state.txt"
+        path.write_text("")
+        assert load_state(str(path)) == {}

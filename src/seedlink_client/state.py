@@ -84,16 +84,26 @@ def load_state(path: str) -> dict[str, tuple[int | None, str | None]]:
     Unlike libslink's ``sl_recoverstate()``, this does not require streams
     to already be configured -- state may be loaded before or after
     stream setup.
+
+    Raises ValueError if the file is not text, or is headerless with
+    content but no parsable entries.
     """
     state: dict[str, tuple[int | None, str | None]] = {}
-    with open(path) as f:
-        lines = [line.rstrip("\n") for line in f]
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = [line.rstrip("\n") for line in f]
+    except UnicodeDecodeError as e:
+        raise ValueError(
+            f"Not a valid state file: {path!r} (undecodable byte at offset {e.start})"
+        ) from e
 
     is_v2 = bool(lines) and lines[0].startswith("#V2")
+    has_content = False
     for line in lines[1:] if is_v2 else lines:
         line = line.strip()
         if not line or line.startswith("#"):
             continue
+        has_content = True
         fields = line.split()
         if is_v2:
             if len(fields) < 2:
@@ -112,4 +122,6 @@ def load_state(path: str) -> dict[str, tuple[int | None, str | None]]:
         except ValueError:
             continue
         state[station_id] = (seqnum, timestamp)
+    if has_content and not is_v2 and not state:
+        raise ValueError(f"Not a valid state file: {path!r} (no state entries)")
     return state

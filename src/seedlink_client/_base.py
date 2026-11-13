@@ -504,6 +504,8 @@ class _SeedLinkBase:
         kept. Entries for concrete stations matching a wildcard station ID
         are requested individually, ahead of the wildcard, at negotiation
         (v4 or v3 multi-station).
+
+        Raises ValueError if ``path`` is not a valid state file.
         """
         self._recovered_state.update(state.load_state(path))
         self._apply_recovered_state(self._streams)

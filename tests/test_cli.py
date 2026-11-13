@@ -155,6 +155,21 @@ class TestMainFileErrors:
         sl.collect.assert_not_called()
         assert "Error:" in capsys.readouterr().err
 
+    def test_invalid_statefile_reported_and_not_overwritten(self, monkeypatch, tmp_path, capsys):
+        from seedlink_client.state import load_state
+
+        path = tmp_path / "state"
+        content = b"\x00\x01\x80\xffabc"
+        path.write_bytes(content)
+        sl = MagicMock()
+        sl.recover_state.side_effect = load_state
+        rc, _ = self._run_main(monkeypatch, ["-S", "IU_COLA", "-x", str(path)], sl)
+        assert rc == 1
+        sl.collect.assert_not_called()
+        sl.add_streamlist.assert_not_called()
+        assert "Error: Not a valid state file" in capsys.readouterr().err
+        assert path.read_bytes() == content
+
     def test_missing_statefile_ignored(self):
         sl = MagicMock()
         sl.recover_state.side_effect = FileNotFoundError

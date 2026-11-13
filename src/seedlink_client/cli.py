@@ -296,6 +296,15 @@ def _print_info(result: dict[str, Any], level: str, protocol: Protocol, verbose:
 
 
 def _configure_streams(sl: SeedLink, args) -> None:
+    # Recovered first so a bad state file leaves no streams, and therefore
+    # isn't overwritten by the save on exit.
+    if args.statefile:
+        try:
+            sl.recover_state(args.statefile)
+        except FileNotFoundError:
+            pass  # no state file yet
+        except ValueError as e:
+            raise SeedLinkError(str(e)) from e
     if args.streams:
         sl.add_streamlist(args.streams, default_selectors=args.selectors)
     elif args.list_file:
@@ -308,11 +317,6 @@ def _configure_streams(sl: SeedLink, args) -> None:
             sl.set_timewindow(start, end or None)
         except ValueError as e:
             raise SeedLinkError(f"Invalid --timewindow {args.timewindow!r}: {e}") from e
-    if args.statefile:
-        try:
-            sl.recover_state(args.statefile)
-        except FileNotFoundError:
-            pass  # no state file yet
 
 
 def _parse_auth(args) -> tuple[str, str] | str | None:
