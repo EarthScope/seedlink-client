@@ -38,8 +38,8 @@ class Stream:
                     and :func:`v4_to_v3_selector`). Empty means "all streams".
         seqnum:     Resume after this sequence number, or None to start
                     from the next available packet (real-time).
-        all_data:   Request the earliest available data (v4 ``DATA ALL``),
-                    overriding ``seqnum``.
+        all_data:   Request the earliest available data (v4 ``DATA ALL``)
+                    when there is no ``seqnum`` to resume from.
         timestamp:  ISO time of the last packet received for this stream,
                     if resuming from saved state. While streaming, this is
                     only current as of the last :meth:`resolve_timestamp`
