@@ -311,7 +311,7 @@ def _configure_streams(sl: SeedLink, args) -> None:
     if args.statefile:
         try:
             sl.recover_state(args.statefile)
-        except OSError:
+        except FileNotFoundError:
             pass  # no state file yet
 
 
@@ -873,7 +873,7 @@ def main() -> int:
             if dumpfile:
                 dumpfile.close()
         return 0
-    except SeedLinkError as e:
+    except (SeedLinkError, OSError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
@@ -883,8 +883,8 @@ def main() -> int:
         if args.statefile and sl.streams:
             try:
                 sl.save_state(args.statefile)
-            except OSError:
-                pass
+            except OSError as e:
+                print(f"Error: could not save state file: {e}", file=sys.stderr)
         sl.close()
 
 

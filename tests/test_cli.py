@@ -128,6 +128,40 @@ class TestConfigureStreams:
         assert args.server == "myhost"
 
 
+class TestMainFileErrors:
+    def _run_main(self, monkeypatch, argv, sl=None):
+        from seedlink_client import cli as cli_module
+
+        sl = sl or MagicMock()
+        sl.streams = []
+        sl.protocol = Protocol.V4
+        fake_cls = MagicMock()
+        fake_cls.from_server_string.return_value = sl
+        monkeypatch.setattr(cli_module, "SeedLink", fake_cls)
+        monkeypatch.setattr("sys.argv", ["seedlink-client", *argv])
+        return cli_module.main(), sl
+
+    def test_unwritable_dumpfile_reported_not_raised(self, monkeypatch, tmp_path, capsys):
+        rc, sl = self._run_main(monkeypatch, ["-o", str(tmp_path / "missing" / "dump.mseed")])
+        assert rc == 1
+        assert "Error:" in capsys.readouterr().err
+        sl.collect.assert_not_called()
+
+    def test_unreadable_statefile_reported(self, monkeypatch, tmp_path, capsys):
+        sl = MagicMock()
+        sl.recover_state.side_effect = PermissionError("Permission denied")
+        rc, _ = self._run_main(monkeypatch, ["-x", str(tmp_path / "state")], sl)
+        assert rc == 1
+        sl.collect.assert_not_called()
+        assert "Error:" in capsys.readouterr().err
+
+    def test_missing_statefile_ignored(self):
+        sl = MagicMock()
+        sl.recover_state.side_effect = FileNotFoundError
+        args = _build_parser().parse_args(["-x", "nonexistent.state"])
+        _configure_streams(sl, args)  # no exception
+
+
 def make_shell(details: int = 0, unpack: bool = False) -> tuple[SeedLinkShell, MagicMock]:
     sl = MagicMock()
     sl.protocol = Protocol.V4
