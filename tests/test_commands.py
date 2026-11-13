@@ -240,9 +240,7 @@ class TestPlanNegotiationV4:
                                  resume=True, lastpkttime=True, batch_active=False)
         assert cmds[-1].text == "ENDFETCH"
 
-    def test_time_window_overrides_seqnum(self):
-        # A set time window always overrides sequence resumption, matching
-        # v3's TIME-vs-DATA/FETCH choice -- see test_time_window_without_seqnum_requests_all.
+    def test_time_window_resumes_from_seqnum(self):
         streams = [Stream(station_id="IU_KONO", seqnum=100)]
         start = datetime(2024, 1, 1, tzinfo=timezone.utc)
         end = datetime(2024, 1, 2, tzinfo=timezone.utc)
@@ -250,7 +248,19 @@ class TestPlanNegotiationV4:
                                  resume=True, lastpkttime=True, batch_active=False,
                                  start_time=start, end_time=end)
         data_cmd = next(c for c in cmds if c.role == "data")
-        assert data_cmd.text == "DATA ALL 2024-01-01T00:00:00Z 2024-01-02T00:00:00Z"
+        assert data_cmd.text == "DATA 101 2024-01-01T00:00:00Z 2024-01-02T00:00:00Z"
+
+    def test_time_window_overlapping_wildcard_requests_all(self):
+        streams = [Stream(station_id="IU_KONO", seqnum=100),
+                   Stream(station_id="IU_*", seqnum=500)]
+        start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        cmds = plan_negotiation(Protocol.V4, streams, dialup=False, multistation=True,
+                                 resume=True, lastpkttime=True, batch_active=False,
+                                 start_time=start)
+        assert [c.text for c in cmds if c.role == "data"] == [
+            "DATA 101 2024-01-01T00:00:00Z",
+            "DATA ALL 2024-01-01T00:00:00Z",
+        ]
 
     def test_time_window_without_seqnum_requests_all(self):
         streams = [Stream(station_id="IU_KONO")]

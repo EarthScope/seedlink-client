@@ -477,7 +477,9 @@ class _SeedLinkBase:
         self._match_cache.clear()
 
     def set_timewindow(self, start: str | datetime, end: str | datetime | None = None) -> None:
-        """Request a fixed time window instead of resuming from a sequence number."""
+        """Request a fixed time window. In v4, a stream with a known sequence
+        number resumes from it within the window; in v3, the window replaces
+        sequence resumption."""
         self._start_time = parse_timestring(start) if isinstance(start, str) else start
         self._end_time = parse_timestring(end) if isinstance(end, str) else end
 

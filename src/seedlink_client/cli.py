@@ -744,7 +744,7 @@ def _build_parser():
         "-tw",
         "--timewindow",
         metavar="BEGIN[/END]",
-        help="Request a time window instead of resuming from a sequence number; "
+        help="Request a time window (v4: resuming from a known sequence number within it); "
         "times may be ISO 8601 or comma-delimited, separated by '/' if both given",
     )
     parser.add_argument("-x", "--statefile", metavar="FILE", help="Save/restore stream sequence numbers to this file")

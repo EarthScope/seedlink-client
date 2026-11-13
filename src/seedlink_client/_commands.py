@@ -226,7 +226,8 @@ def data_v4(
     """DATA [<seq>|ALL] [<start> [<end>]] (v4).
 
     A stream requesting a time window with no prior sequence number gets
-    ``DATA ALL <start>...`` -- "give me everything in this window".
+    ``DATA ALL <start>...`` -- "give me everything in this window"; with
+    one, ``DATA <seq> <start>...`` resumes within the window.
     """
     parts = ["DATA"]
     if seqnum is not None:
@@ -398,9 +399,9 @@ def plan_negotiation(
       it, which are not negotiated): no STATION, no END -- just SELECT(s)
       then DATA/FETCH/TIME.
 
-    A stream's ``all_data``/time window takes precedence over resuming
-    from ``seqnum`` (v4 only -- v3 has no "all data" request). A set time
-    window always overrides sequence resumption, matching libslink.
+    In v4, a stream's ``seqnum`` takes precedence over ``all_data``, and
+    is combined with a set time window to resume within it. In v3, a set
+    time window (TIME) always overrides sequence resumption.
 
     Except in v3 uni-station mode, a wildcard station ID matching any
     exact one in ``streams`` is never resumed from its own ``seqnum``,
@@ -457,9 +458,7 @@ def plan_negotiation(
             stream_cmds = [station_v4(stream.station_id)]
             for selector in stream.selectors:
                 stream_cmds.append(select_v4(stream.station_id, _wire_selector(selector)))
-            # A set time window always overrides sequence resumption, matching
-            # v3's TIME-vs-DATA/FETCH choice above.
-            seqnum = None if start_time is not None else _resume_seqnum(stream)
+            seqnum = _resume_seqnum(stream)
             stream_cmds.append(data_v4(stream.station_id, seqnum, stream.all_data, start_time, end_time))
             if not is_wildcard(stream.station_id) and any(
                 w.matches(stream.station_id) for w in wildcards

@@ -24,6 +24,7 @@
 - Combine the selectors of all matching wildcard station IDs for a station received via them
 - Continue v4 negotiation when a station also matched by a wildcard station ID is rejected
 - Track stations received via '*' individually in all-station mode too, and save '*' with its sequence there
+- Resume a v4 time window from a known sequence number with DATA <seq> <start> [<end>]
 
 ## 0.2.0
 
