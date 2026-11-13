@@ -18,6 +18,7 @@
 - Fsync the state file before renaming it into place, and stop briefly altering the process umask
 - Reject --auth without both a username and password instead of sending an empty one
 - Report CLI file errors (dumpfile, state file) as errors rather than tracebacks or silence
+- Treat only '*' and '?' as station ID wildcards, matching the protocol specification; '[' is now literal
 
 ## 0.2.0
 

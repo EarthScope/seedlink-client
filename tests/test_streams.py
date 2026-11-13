@@ -9,6 +9,7 @@ import pickle
 from seedlink_client.protocol import SeedLinkError
 from seedlink_client.streams import (
     Stream,
+    is_wildcard,
     parse_streamlist,
     read_streamlist_file,
     sort_streams,
@@ -154,6 +155,17 @@ class TestStreamMatches:
         stream = Stream(station_id="IU_K?NO")
         assert stream.matches("IU_KONO")
         assert not stream.matches("IU_KXXO")
+
+    def test_brackets_are_literal(self):
+        stream = Stream(station_id="IU_K[AO]*")
+        assert stream.matches("IU_K[AO]NO")
+        assert not stream.matches("IU_KANO")
+        assert not is_wildcard("IU_K[AO]NO")
+
+    def test_whole_id_must_match(self):
+        stream = Stream(station_id="IU_K?")
+        assert stream.matches("IU_KO")
+        assert not stream.matches("IU_KONO")
 
     def test_compiled_pattern_cache_invalidated_on_change(self):
         stream = Stream(station_id="IU_*")

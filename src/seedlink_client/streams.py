@@ -9,7 +9,6 @@ connection when the negotiated protocol turns out to be the other.
 
 from __future__ import annotations
 
-import fnmatch
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -18,8 +17,14 @@ from .protocol import SeedLinkError
 
 
 def is_wildcard(station_id: str) -> bool:
-    """Whether a station ID contains wildcard pattern characters."""
-    return any(c in station_id for c in "*?[")
+    """Whether a station ID contains wildcard characters ('*' or '?')."""
+    return "*" in station_id or "?" in station_id
+
+
+def _wildcard_regex(pattern: str) -> re.Pattern[str]:
+    """Compile a station ID pattern where only '*' and '?' are special."""
+    parts = (".*" if c == "*" else "." if c == "?" else re.escape(c) for c in pattern)
+    return re.compile("".join(parts) + r"\Z", re.DOTALL)
 
 
 @dataclass
@@ -68,7 +73,7 @@ class Stream:
         if not is_wildcard(pattern):
             return station_id == pattern
         if self._match_re is None or self._match_re_pattern != pattern:
-            self._match_re = re.compile(fnmatch.translate(pattern))
+            self._match_re = _wildcard_regex(pattern)
             self._match_re_pattern = pattern
         return self._match_re.match(station_id) is not None
 
