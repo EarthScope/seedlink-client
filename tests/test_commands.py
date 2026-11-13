@@ -26,6 +26,14 @@ class TestEncode:
         with pytest.raises(SeedLinkError, match="command-line limit"):
             encode(station_v4("X" * MAX_COMMAND_LEN))
 
+    def test_non_ascii_rejected(self):
+        with pytest.raises(SeedLinkError, match="non-ASCII"):
+            encode(station_v4("IU_KÖNO"))
+
+    def test_embedded_line_break_rejected(self):
+        with pytest.raises(SeedLinkError, match="control characters"):
+            encode(station_v4("IU_KONO\r\nBYE"))
+
 
 class TestPlanHandshake:
     def test_v4_full_handshake(self):

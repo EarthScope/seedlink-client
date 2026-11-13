@@ -75,7 +75,10 @@ class Command:
 
 
 def encode(cmd: Command) -> bytes:
-    """Return ``cmd``'s wire bytes, rejecting a line over MAX_COMMAND_LEN."""
+    """Return ``cmd``'s wire bytes, rejecting a line over MAX_COMMAND_LEN or
+    one with non-ASCII or control characters (e.g. an embedded CR/LF)."""
+    if not (cmd.text.isascii() and cmd.text.isprintable()):
+        raise SeedLinkError(f"Command contains non-ASCII or control characters: {cmd.text!r}")
     wire = cmd.text.encode("ascii") + cmd.terminator
     if len(wire) > MAX_COMMAND_LEN:
         raise SeedLinkError(
