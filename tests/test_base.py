@@ -179,6 +179,25 @@ class TestWildcardExpansion:
             "END",
         ]
 
+    def test_derived_selectors_combine_matching_wildcards(self):
+        sl = self._client()
+        sl.add_stream("IU_*", "B_H_Z L_H_Z")
+        sl.add_stream("*_ANMO", "L_H_Z H_H_Z")
+        sl.add_stream("GE_*", "V_H_Z")
+        sl._prepare_streams()
+        sl._update_stream_state(self._packet("IU_ANMO", 6000))
+        derived = next(s for s in sl.streams if s.station_id == "IU_ANMO")
+        assert derived.selectors == ["B_H_Z", "L_H_Z", "H_H_Z"]
+
+    def test_derived_selectors_all_streams_if_any_wildcard_has_none(self):
+        sl = self._client()
+        sl.add_stream("IU_*", "B_H_Z")
+        sl.add_stream("*_ANMO")
+        sl._prepare_streams()
+        sl._update_stream_state(self._packet("IU_ANMO", 6000))
+        derived = next(s for s in sl.streams if s.station_id == "IU_ANMO")
+        assert derived.selectors == []
+
     def test_packets_tracked_per_station(self, tmp_path):
         sl = self._client()
         sl.add_stream("II_*")

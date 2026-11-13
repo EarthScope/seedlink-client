@@ -21,6 +21,7 @@
 - Treat only '*' and '?' as station ID wildcards, matching the protocol specification; '[' is now literal
 - Reject v3 station IDs that are not NET_STA, and accept 'STA NET' in the shell's v3 STATION command
 - Resume a wildcard station ID that matches an exact one with plain DATA, and save it as UNSET in multi-station mode
+- Combine the selectors of all matching wildcard station IDs for a station received via them
 
 ## 0.2.0
 

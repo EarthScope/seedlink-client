@@ -30,7 +30,7 @@ from .protocol import (
     parse_hello,
 )
 from .protocol import TLS_PORT as _TLS_PORT
-from .streams import Stream, sort_streams
+from .streams import Stream
 from .time_utils import parse_timestring
 
 # Default/minimum size of the persistent receive buffer. It grows to fit an
@@ -267,16 +267,24 @@ class _SeedLinkBase:
     def _derive_stream(
         self, station_id: str, seqnum: int | None = None, timestamp: str | None = None
     ) -> Stream | None:
-        """Add an exact-ID stream for ``station_id`` inheriting the selection
-        of the first wildcard stream that matches it, or return None if none does."""
-        for wildcard in sort_streams(self._streams):
-            if streams.is_wildcard(wildcard.station_id) and wildcard.matches(station_id):
-                stream = Stream(station_id=station_id, selectors=list(wildcard.selectors),
-                                seqnum=seqnum, all_data=wildcard.all_data,
-                                timestamp=timestamp)
-                self._streams.append(stream)
-                return stream
-        return None
+        """Add an exact-ID stream for ``station_id`` combining the selection
+        of all wildcard streams that match it, or return None if none does.
+
+        Selectors are merged without duplicates; a matching wildcard with
+        no selectors (all streams) means the new stream has none either.
+        """
+        matching = [s for s in self._streams
+                    if streams.is_wildcard(s.station_id) and s.matches(station_id)]
+        if not matching:
+            return None
+        if all(w.selectors for w in matching):
+            selectors = list(dict.fromkeys(sel for w in matching for sel in w.selectors))
+        else:
+            selectors = []
+        stream = Stream(station_id=station_id, selectors=selectors, seqnum=seqnum,
+                        all_data=any(w.all_data for w in matching), timestamp=timestamp)
+        self._streams.append(stream)
+        return stream
 
     # -- Frame/packet handling, shared by both transports' collect() --------
 
