@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Log connection loss and pending reconnect during streaming
+
 ## 0.2.0
 
 - Add -3/-4 shorthand flags to pin the protocol version, alongside --protocol

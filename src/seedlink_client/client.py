@@ -396,6 +396,7 @@ class SeedLink(_SeedLinkBase):
         self._streaming = True
 
     def _reconnect_after_delay(self) -> None:
+        logger.debug("Reconnecting to %s:%d in %.0fs", self._host, self._port, self._reconnect_delay)
         time.sleep(self._reconnect_delay)
         while True:
             try:
@@ -465,16 +466,18 @@ class SeedLink(_SeedLinkBase):
                         next_keepalive = now + self._keepalive
                         try:
                             self._send_command(_commands.info("ID"))
-                        except SeedLinkError:
+                        except SeedLinkError as e:
+                            logger.warning("Connection to %s:%d lost: %s", self._host, self._port, e)
                             self.close()
                     continue
 
                 try:
                     frame = self._recv_frame()
-                except SeedLinkError:
+                except SeedLinkError as e:
                     self.close()
                     if not reconnect:
                         raise
+                    logger.warning("Connection to %s:%d lost: %s", self._host, self._port, e)
                     continue
 
                 if frame is None:  # dial-up end of stream

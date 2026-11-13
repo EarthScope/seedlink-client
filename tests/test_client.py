@@ -405,6 +405,29 @@ class TestCollectIdleTimeout:
         assert client._send_command.call_args_list[0].args[0].text == "INFO ID"
 
 
+class TestCollectReconnectLogging:
+    def test_connection_loss_and_reconnect_logged(self, caplog):
+        client = make_client(Protocol.V4)
+        client._streaming = True
+        client._reconnect_delay = 0
+        client._poll_readable = lambda timeout: True
+
+        def drop():
+            raise SeedLinkError("Connection closed")
+
+        client._recv_frame = drop
+
+        def reconnect():
+            raise SeedLinkAuthError("stop")  # ends the test after one attempt
+
+        client.connect = reconnect
+        with caplog.at_level("DEBUG", logger="seedlink_client.client"):
+            with pytest.raises(SeedLinkAuthError):
+                next(client.collect())
+        assert "Connection to localhost:18000 lost: Connection closed" in caplog.text
+        assert "Reconnecting to localhost:18000 in 0s" in caplog.text
+
+
 class TestCollectJsonError:
     """A mid-stream v4 JSON ERROR packet must be handled the same way a
     synchronous ERROR reply line is -- logged and reconnected/raised --
