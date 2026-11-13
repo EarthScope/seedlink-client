@@ -408,8 +408,17 @@ class SeedLink(_SeedLinkBase):
 
         Raises:
             SeedLinkError: if no station was accepted (v3 multi-station), or
-                (v4) if any STATION/SELECT/DATA command was rejected.
+                (v4) if any STATION/SELECT/DATA command was rejected. The
+                connection is closed, since the server may hold a partial
+                selection.
         """
+        try:
+            self._negotiate()
+        except SeedLinkError:
+            self.close()
+            raise
+
+    def _negotiate(self) -> None:
         self._match_cache.clear()
         self._prepare_streams()
         plan = _commands.plan_negotiation(

@@ -418,11 +418,13 @@ class AsyncSeedLink(_SeedLinkBase):
         """Select streams and start streaming: STATION/SELECT/DATA, then END.
 
         v4 commands are pipelined, with END sent only once all are accepted.
+        On failure the connection is closed, since the server may hold a
+        partial selection.
         """
         try:
             async with self._timeout_scope():
                 await self._negotiate()
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, SeedLinkError):
             await self.close()
             raise
         except TimeoutError as e:

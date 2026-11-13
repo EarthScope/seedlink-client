@@ -342,11 +342,12 @@ class TestNegotiateV4Pipelined:
         client._sock.recv_into = MagicMock(side_effect=_mock_recv_stream(
             b"ERROR ARGUMENTS bad station\r\nOK\r\nOK\r\n"
         ))
+        sock = client._sock
         with pytest.raises(SeedLinkError, match="bad station"):
             client.negotiate()
-        assert client._sock.sendall.call_count == 1
-        assert client._recv_start == client._recv_end  # all replies consumed
+        assert sock.sendall.call_count == 1
         assert not client.is_streaming
+        assert not client.is_connected  # server may hold a partial selection
 
     def test_rejection_reported_when_connection_then_closes(self):
         client = make_client(Protocol.V4)

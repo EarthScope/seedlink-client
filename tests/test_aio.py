@@ -318,6 +318,7 @@ class TestNegotiatePipelined:
                 with pytest.raises(SeedLinkError, match="bad station"):
                     await sl.negotiate()
                 assert not sl.is_streaming
+                assert not sl.is_connected  # server may hold a partial selection
                 await asyncio.sleep(0.35)
             server.close()
             assert received == ["STATION IU_KONO", "DATA"]
