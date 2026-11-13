@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Literal
 
@@ -67,6 +67,8 @@ class Command:
                     commands; None otherwise.
         log_text:   Text to log or report in place of ``text``, e.g. with
                     credentials masked; None to use ``text``.
+        tolerated:  Whether a rejection is logged rather than fatal: a v4
+                    command for a station also covered by a wildcard.
     """
 
     text: str
@@ -75,6 +77,7 @@ class Command:
     role: Role = "generic"
     stream_id: str | None = None
     log_text: str | None = None
+    tolerated: bool = False
 
     @property
     def display_text(self) -> str:
@@ -383,7 +386,9 @@ def plan_negotiation(
 
     - v4: per stream, STATION then one SELECT per selector then DATA;
       finally END or ENDFETCH. The transport pipelines STATION/SELECT/DATA
-      and sends END only once every reply is OK; any rejection is fatal.
+      and sends END only once every reply is accepted; any rejection is
+      fatal, except for a station also matched by a wildcard station ID,
+      which is still received via the wildcard.
     - v3 multi-station: per stream, STATION then SELECT(s) then
       DATA/FETCH/TIME; finally END. A rejected STATION means that
       stream's SELECT/DATA commands are skipped (the transport's
@@ -441,15 +446,21 @@ def plan_negotiation(
         return v4_to_v3_selector(selector) or selector
 
     if protocol is Protocol.V4:
+        wildcards = [s for s in streams if is_wildcard(s.station_id)]
         commands: list[Command] = []
         for stream in streams:
-            commands.append(station_v4(stream.station_id))
+            stream_cmds = [station_v4(stream.station_id)]
             for selector in stream.selectors:
-                commands.append(select_v4(stream.station_id, _wire_selector(selector)))
+                stream_cmds.append(select_v4(stream.station_id, _wire_selector(selector)))
             # A set time window always overrides sequence resumption, matching
             # v3's TIME-vs-DATA/FETCH choice above.
             seqnum = None if start_time is not None else _resume_seqnum(stream)
-            commands.append(data_v4(stream.station_id, seqnum, stream.all_data, start_time, end_time))
+            stream_cmds.append(data_v4(stream.station_id, seqnum, stream.all_data, start_time, end_time))
+            if not is_wildcard(stream.station_id) and any(
+                w.matches(stream.station_id) for w in wildcards
+            ):
+                stream_cmds = [replace(cmd, tolerated=True) for cmd in stream_cmds]
+            commands.extend(stream_cmds)
         commands.append(end_v4(dialup))
         return commands
 

@@ -397,3 +397,17 @@ class TestPlanNegotiationV3Uni:
         with pytest.raises(SeedLinkError):
             plan_negotiation(Protocol.V3, streams, dialup=False, multistation=False,
                               resume=True, lastpkttime=True, batch_active=False)
+
+
+class TestPlanNegotiationTolerated:
+    def test_v4_station_covered_by_wildcard_tolerated(self):
+        streams = [Stream(station_id="IU_KONO", selectors=["B_H_Z"]),
+                   Stream(station_id="GE_WLF"), Stream(station_id="IU_*")]
+        cmds = plan_negotiation(Protocol.V4, streams, dialup=False, multistation=True,
+                                resume=True, lastpkttime=False, batch_active=False)
+        assert [(c.text, c.tolerated) for c in cmds] == [
+            ("STATION IU_KONO", True), ("SELECT B_H_Z", True), ("DATA", True),
+            ("STATION GE_WLF", False), ("DATA", False),
+            ("STATION IU_*", False), ("DATA", False),
+            ("END", False),
+        ]

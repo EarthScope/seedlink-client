@@ -311,7 +311,8 @@ class AsyncSeedLink(_SeedLinkBase):
     async def _send_pipelined(self, cmds: list[Command]) -> None:
         """Send commands that each expect a reply without waiting for each
         reply, up to PIPELINE_WINDOW at a time, then read the replies in
-        order. The first rejection is raised once its window's replies are read.
+        order. The first rejection is raised once its window's replies are
+        read; a tolerated command's rejection is logged and skipped.
         """
         if self._writer is None:
             raise SeedLinkError("Not connected")
@@ -338,7 +339,11 @@ class AsyncSeedLink(_SeedLinkBase):
                 try:
                     cmd.parse(line)
                 except SeedLinkError as e:
-                    error = error or e
+                    if cmd.tolerated:
+                        logger.warning("Command not accepted (%s), continuing via wildcard: %s",
+                                       cmd.display_text, e)
+                    else:
+                        error = error or e
             if error is not None:
                 raise error
 

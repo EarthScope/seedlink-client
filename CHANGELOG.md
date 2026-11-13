@@ -22,6 +22,7 @@
 - Reject v3 station IDs that are not NET_STA, and accept 'STA NET' in the shell's v3 STATION command
 - Resume a wildcard station ID that matches an exact one with plain DATA, and save it as UNSET in multi-station mode
 - Combine the selectors of all matching wildcard station IDs for a station received via them
+- Continue v4 negotiation when a station also matched by a wildcard station ID is rejected
 
 ## 0.2.0
 

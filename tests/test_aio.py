@@ -325,6 +325,32 @@ class TestNegotiatePipelined:
 
         run(scenario())
 
+    def test_rejection_of_station_covered_by_wildcard_tolerated(self):
+        async def scenario():
+            received = []
+
+            async def handle(reader, writer):
+                lines = await self._handshake(reader, writer)
+                for _ in range(4):
+                    received.append(await lines.read_line())
+                writer.write(b"ERROR ARGUMENTS unknown station\r\nERROR ARGUMENTS no station\r\n"
+                             b"OK\r\nOK\r\n")
+                await writer.drain()
+                received.append(await lines.read_line())
+                writer.close()
+
+            server, port = await _serve_once(handle)
+            async with AsyncSeedLink("127.0.0.1", port, timeout=5) as sl:
+                sl.add_stream("IU_*")
+                sl.add_stream("IU_KONO")
+                await sl.negotiate()
+                assert sl.is_streaming
+                await asyncio.sleep(0.05)
+            server.close()
+            assert received == ["STATION IU_KONO", "DATA", "STATION IU_*", "DATA", "END"]
+
+        run(scenario())
+
 
 class TestCollectIdleTimeout:
     def test_info_traffic_resets_timer(self):

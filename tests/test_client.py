@@ -361,6 +361,27 @@ class TestNegotiateV4Pipelined:
         assert not client.is_streaming
         assert not client.is_connected  # server may hold a partial selection
 
+    def test_rejection_of_station_covered_by_wildcard_tolerated(self, caplog):
+        client = make_client(Protocol.V4)
+        client._streams = [Stream(station_id="IU_*"), Stream(station_id="IU_KONO")]
+        client._sock.recv_into = MagicMock(side_effect=_mock_recv_stream(
+            b"ERROR ARGUMENTS unknown station\r\nERROR ARGUMENTS no station\r\nOK\r\nOK\r\n"
+        ))
+        with caplog.at_level("WARNING"):
+            client.negotiate()
+        assert client.is_streaming
+        assert client._sock.sendall.call_args_list[-1].args[0] == b"END\r\n"
+        assert "continuing via wildcard" in caplog.text
+
+    def test_rejection_of_wildcard_still_fatal(self):
+        client = make_client(Protocol.V4)
+        client._streams = [Stream(station_id="IU_*"), Stream(station_id="IU_KONO")]
+        client._sock.recv_into = MagicMock(side_effect=_mock_recv_stream(
+            b"OK\r\nOK\r\nERROR ARGUMENTS bad pattern\r\nOK\r\n"
+        ))
+        with pytest.raises(SeedLinkError, match="bad pattern"):
+            client.negotiate()
+
     def test_rejection_reported_when_connection_then_closes(self):
         client = make_client(Protocol.V4)
         client._streams = [Stream(station_id="IU_KONO", selectors=["B_H_?"])]
