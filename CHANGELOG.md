@@ -16,6 +16,7 @@
 - Close the connection when negotiate() fails rather than leave a partial selection on the server
 - Mask AUTH passwords and tokens in debug logs and error messages
 - Fsync the state file before renaming it into place, and stop briefly altering the process umask
+- Reject --auth without both a username and password instead of sending an empty one
 
 ## 0.2.0
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime
 from unittest.mock import MagicMock
 
+import pytest
 from pymseed import DataEncoding, MS3Record, timestr2nstime
 
 from seedlink_client.cli import (
@@ -77,6 +78,12 @@ class TestParseAuth:
     def test_userpass(self):
         args = _build_parser().parse_args(["--auth", "bob:secret"])
         assert _parse_auth(args) == ("bob", "secret")
+
+    @pytest.mark.parametrize("value", ["bob", "bob:", ":secret"])
+    def test_userpass_missing_part_rejected(self, value):
+        args = _build_parser().parse_args(["--auth", value])
+        with pytest.raises(ValueError, match="USER:PASS"):
+            _parse_auth(args)
 
     def test_jwt(self):
         args = _build_parser().parse_args(["--jwt", "sometoken"])

@@ -318,6 +318,8 @@ def _configure_streams(sl: SeedLink, args) -> None:
 def _parse_auth(args) -> tuple[str, str] | str | None:
     if args.auth:
         user, _, password = args.auth.partition(":")
+        if not user or not password:
+            raise ValueError("--auth requires USER:PASS with both parts non-empty")
         return (user, password)
     if args.jwt:
         return args.jwt
