@@ -28,6 +28,7 @@
 - Fail v3 negotiation when none of a station's selectors are accepted, instead of receiving all of its streams
 - Fail negotiation on a reply that is neither OK nor ERROR, rather than treating it as a rejection
 - Report an unreadable or invalid state file as an error before connecting, without overwriting it
+- Include the station ID in verbose packet lines
 
 ## 0.2.0
 

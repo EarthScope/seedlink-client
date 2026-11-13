@@ -587,8 +587,14 @@ class TestPrintPacket:
     def test_verbose_prints_header_only(self, capsys):
         _print_packet(_make_mseed_packet(), verbose=True)
         out = capsys.readouterr().out
-        assert "(local), seq 42, Received" in out
+        assert "(local), seq 42, IU_COLA, Received" in out
         assert "payload format miniSEED 3" in out
+
+    def test_verbose_omits_empty_station_id(self, capsys):
+        pkt = _make_mseed_packet()
+        pkt.station_id = ""
+        _print_packet(pkt, verbose=True)
+        assert "(local), seq 42, Received" in capsys.readouterr().out
 
     def test_details_one_prints_summary_line(self, capsys):
         _print_packet(_make_mseed_packet(), details=1)

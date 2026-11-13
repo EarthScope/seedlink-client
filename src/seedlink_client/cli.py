@@ -120,9 +120,10 @@ def _print_packet(pkt: SeedLinkPacket, details: int = 0, unpack: bool = False, v
     if verbose:
         now = datetime.datetime.now()
         seq = pkt.seqnum if pkt.seqnum is not None else "-"
+        sid = f"{pkt.station_id}, " if pkt.station_id else ""
         print(
             f"{_verbose_timestamp_prefix(now)}.{now.microsecond // 1000:03d} (local), "
-            f"seq {seq}, Received {len(pkt.payload)} bytes of payload format "
+            f"seq {seq}, {sid}Received {len(pkt.payload)} bytes of payload format "
             f"{_payload_format_str(pkt.payload_format, pkt.payload_subformat)}"
         )
 
