@@ -14,6 +14,7 @@ from seedlink_client.protocol import (
     SeedLinkPacket,
     StreamEvent,
     classify_stream_prefix,
+    decode_frame_v4_body,
     is_packet_signature,
     parse_header_v3,
     parse_header_v4,
@@ -80,6 +81,16 @@ class TestParseHeaderV4:
     def test_oversized_station_id_length_raises(self):
         with pytest.raises(SeedLinkError):
             parse_header_v4(self._build(sidlen=MAX_STATIONID + 1))
+
+    def test_non_ascii_format_raises_seedlink_error(self):
+        with pytest.raises(SeedLinkError):
+            parse_header_v4(self._build(fmt=b"\xff"))
+
+    def test_non_ascii_station_id_raises_seedlink_error(self):
+        frame = self._build(length=0, sidlen=3) + b"I\xffU"
+        header = parse_header_v4(frame)
+        with pytest.raises(SeedLinkError):
+            decode_frame_v4_body(frame, 0, header)
 
 
 class TestClassifyStreamPrefix:

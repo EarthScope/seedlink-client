@@ -274,9 +274,14 @@ def parse_header_v4(buf: bytes) -> HeaderV4:
         raise SeedLinkError(
             f"Declared station ID length {sidlen} exceeds sanity limit {MAX_STATIONID}"
         )
+    try:
+        payload_format = fmt.decode("ascii")
+        payload_subformat = subfmt.decode("ascii")
+    except UnicodeDecodeError as e:
+        raise SeedLinkError(f"Invalid v4 payload format code: {fmt + subfmt!r}") from e
     return HeaderV4(
-        payload_format=fmt.decode("ascii"),
-        payload_subformat=subfmt.decode("ascii"),
+        payload_format=payload_format,
+        payload_subformat=payload_subformat,
         payload_length=length,
         seqnum=seqnum,
         station_id_length=sidlen,
@@ -317,7 +322,11 @@ def decode_frame_v4_body(view: Any, start: int, header: HeaderV4) -> _RawFrame:
     """
     pos = start + HEADSIZE_V4
     if header.station_id_length:
-        station_id = bytes(view[pos:pos + header.station_id_length]).decode("ascii")
+        raw_id = bytes(view[pos:pos + header.station_id_length])
+        try:
+            station_id = raw_id.decode("ascii")
+        except UnicodeDecodeError as e:
+            raise SeedLinkError(f"Invalid v4 station ID: {raw_id!r}") from e
         pos += header.station_id_length
     else:
         station_id = ""
