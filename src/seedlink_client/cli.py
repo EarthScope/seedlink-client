@@ -14,7 +14,7 @@ import threading
 import time
 from typing import Any
 
-from . import _commands
+from . import __version__, _commands
 from .client import SeedLink
 from .protocol import Protocol, SeedLinkError, SeedLinkPacket
 
@@ -710,8 +710,6 @@ class SeedLinkShell(cmd.Cmd):
 def _build_parser():
     import argparse
 
-    from . import __version__
-
     parser = argparse.ArgumentParser(
         prog="seedlink-client",
         description="SeedLink protocol 3.x/4.0 client for streaming geophysical data.",
@@ -819,6 +817,8 @@ def main() -> int:
             dialup=args.dialup,
             batch=args.batch,
             auth=_parse_auth(args),
+            clientname="seedlink-client-cli",
+            clientversion=__version__,
         )
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
