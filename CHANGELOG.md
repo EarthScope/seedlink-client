@@ -50,6 +50,7 @@
 - Send keepalives only after the keepalive interval with no data, one at a time
 - Bound connect, TLS handshake, and command I/O by default limits when no timeout is set
 - Report the CLI as seedlink-client-cli in USERAGENT to distinguish it from the library
+- Omit invalid timestamps from the state file
 - Require pymseed >=1.0.1,<2
 - Convert negated selectors between v3 and v4 syntax
 - Log untracked wildcard-matched stations at debug level

@@ -21,6 +21,13 @@ class TestSaveState:
             "II_BFO 11646353 2025-12-07T21:48:51.0445Z\n"
         )
 
+    @pytest.mark.parametrize("timestamp", ["UNSET", "ERROR"])
+    def test_invalid_timestamp_omitted(self, tmp_path, timestamp):
+        path = tmp_path / "state.txt"
+        save_state(str(path), [Stream(station_id="IU_COLA", seqnum=5, timestamp=timestamp)])
+        assert path.read_text().splitlines()[1] == "IU_COLA 5"
+        assert load_state(str(path)) == {"IU_COLA": (5, None)}
+
     @pytest.mark.skipif(os.name == "nt", reason="POSIX file permissions only")
     def test_permissions_follow_umask(self, tmp_path):
         """Like a plain open(), so another process/user can read a state

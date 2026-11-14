@@ -27,7 +27,8 @@ def save_state(path: str, streams: list[Stream], multistation: bool = False) -> 
 
         StationID Sequence [Timestamp]
 
-    Sequence is decimal, or 'UNSET' if the stream has none yet. With
+    Sequence is decimal, or 'UNSET' if the stream has none yet. A
+    timestamp that does not parse is omitted. With
     ``multistation``, wildcard station IDs are always written as 'UNSET'
     with no timestamp: stations received via them have their own entries.
 
@@ -50,7 +51,7 @@ def save_state(path: str, streams: list[Stream], multistation: bool = False) -> 
                 seq = "UNSET" if stream.seqnum is None else str(stream.seqnum)
                 fields = [stream.station_id, seq]
                 timestamp = stream.resolve_timestamp()
-                if timestamp:
+                if timestamp and _valid_timestamp(timestamp):
                     fields.append(timestamp)
                 f.write(" ".join(fields) + "\n")
             f.flush()
@@ -62,6 +63,16 @@ def save_state(path: str, streams: list[Stream], multistation: bool = False) -> 
         except OSError:
             pass
         raise
+
+
+def _valid_timestamp(timestamp: str) -> bool:
+    """Whether ``timestamp`` parses, excluding sentinels such as 'UNSET'
+    or 'ERROR' that would make the line unreadable."""
+    try:
+        parse_timestring(timestamp)
+    except ValueError:
+        return False
+    return True
 
 
 def _create_temp(directory: str) -> tuple[int, str]:
