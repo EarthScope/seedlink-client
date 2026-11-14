@@ -754,7 +754,9 @@ def _build_parser():
         "times may be ISO 8601 or comma-delimited, separated by '/' if both given",
     )
     parser.add_argument("-x", "--statefile", metavar="FILE", help="Save/restore stream sequence numbers to this file")
-    parser.add_argument("-k", "--keepalive", type=float, metavar="SECS", help="Send an INFO ID heartbeat after this long with no data")
+    parser.add_argument(
+        "-k", "--keepalive", type=float, metavar="SECS", help="Send an INFO ID heartbeat after this long with no data"
+    )
     parser.add_argument(
         "-nd", "--netdelay", type=float, default=30.0, metavar="SECS", help="Reconnection delay (default: 30)"
     )

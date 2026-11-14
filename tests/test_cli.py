@@ -12,13 +12,13 @@ from seedlink_client.cli import (
     SeedLinkShell,
     _build_parser,
     _configure_streams,
-    _recover_state,
     _fmt_info,
     _normalize_stations,
     _parse_auth,
     _payload_format_str,
     _print_info,
     _print_packet,
+    _recover_state,
     _verbose_timestamp_prefix,
 )
 from seedlink_client.protocol import Protocol, SeedLinkPacket
