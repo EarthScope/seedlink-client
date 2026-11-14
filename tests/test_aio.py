@@ -391,11 +391,10 @@ class TestCollectIdleTimeout:
 
 
 class TestCollectJsonError:
-    """A mid-stream v4 JSON ERROR packet must be handled like a synchronous
-    ERROR reply line -- see the sync client's TestCollectJsonError -- not
-    yielded to the caller as an ordinary data packet."""
+    """A mid-stream v4 JSON ERROR packet is logged and skipped, keeping the
+    connection -- see the sync client's TestCollectJsonError."""
 
-    def test_raised_when_reconnect_false(self, caplog):
+    def test_logged_and_skipped(self, caplog):
         async def scenario():
             sl = AsyncSeedLink("127.0.0.1", 0)
             sl._writer = MagicMock()  # is_connected -> True; no real socket needed
@@ -406,20 +405,24 @@ class TestCollectJsonError:
                                      payload_subformat=SUBFORMAT_JSON_ERROR,
                                      payload=b'{"message": "no such station"}',
                                      info_continues=False)
+            data_frame = _RawFrame(station_id="IU_KONO", seqnum=8, payload_format="2",
+                                    payload_subformat="D", payload=b"x", info_continues=False)
+            frames = iter([error_frame, data_frame])
 
             async def always_ready(n):
                 return None
 
             async def recv_frame():
-                return error_frame
+                return next(frames)
 
             sl._ensure = always_ready
             sl._recv_frame = recv_frame
             gen = sl.collect(reconnect=False)
             try:
                 with caplog.at_level("WARNING"):
-                    with pytest.raises(SeedLinkError, match="no such station"):
-                        await gen.__anext__()
+                    pkt = await gen.__anext__()
+                assert pkt.seqnum == 8
+                assert sl.is_connected
                 assert "no such station" in caplog.text
             finally:
                 await gen.aclose()

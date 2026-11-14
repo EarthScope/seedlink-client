@@ -12,7 +12,7 @@ from collections.abc import Generator
 from typing import Any
 
 from . import _commands, mseed
-from ._base import _SeedLinkBase
+from ._base import _CONNECT_TIMEOUT, _IO_TIMEOUT, _TLS_HANDSHAKE_TIMEOUT, _SeedLinkBase
 from ._commands import Command
 from .protocol import (
     FORMAT_JSON,
@@ -23,6 +23,7 @@ from .protocol import (
     MIN_PAYLOAD_DETECT,
     Protocol,
     SeedLinkAuthError,
+    SeedLinkConfigError,
     SeedLinkError,
     SeedLinkPacket,
     SeedLinkResponse,
@@ -99,15 +100,18 @@ class SeedLink(_SeedLinkBase):
             try:
                 sock = socket.socket(af, socktype, proto)
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                if self._timeout is not None:
-                    sock.settimeout(self._timeout)
+                sock.settimeout(self._timeout if self._timeout is not None else _CONNECT_TIMEOUT)
                 sock.connect(sockaddr)
                 if self._tls:
                     context = ssl.create_default_context()
                     if self._tls_noverify:
                         context.check_hostname = False
                         context.verify_mode = ssl.CERT_NONE
+                    if self._timeout is None:
+                        sock.settimeout(_TLS_HANDSHAKE_TIMEOUT)
                     sock = context.wrap_socket(sock, server_hostname=self._host)
+                if self._timeout is None:
+                    sock.settimeout(_IO_TIMEOUT)
                 self._sock = sock
                 self._is_ssl = isinstance(sock, ssl.SSLSocket)
                 self._reset_recv_buf()
@@ -167,6 +171,7 @@ class SeedLink(_SeedLinkBase):
             handshake_cmds = _commands.plan_handshake(
                 self.protocol, self.server_capabilities, self._clientname,
                 self._clientversion, self._auth, self._want_batch,
+                protocol_forced=self._requested_protocol is not None,
             )
             for cmd in handshake_cmds:
                 resp = self._send_command(cmd)
@@ -453,7 +458,7 @@ class SeedLink(_SeedLinkBase):
                 self.connect()
                 self.negotiate()
                 return
-            except SeedLinkAuthError:
+            except (SeedLinkAuthError, SeedLinkConfigError):
                 raise
             except SeedLinkError as e:
                 logger.warning("Reconnect to %s:%d failed: %s; retrying in %.0fs",
@@ -469,11 +474,13 @@ class SeedLink(_SeedLinkBase):
         packets arrive, so :meth:`~seedlink_client._base._SeedLinkBase.save_state`
         is always current and a reconnect resumes where it left off.
 
-        An INFO ID heartbeat is sent every ``keepalive`` seconds (its reply
-        is consumed internally, never yielded); the connection is dropped
-        and retried after ``reconnect_delay`` seconds if nothing, data or
-        keepalive reply, arrives for ``idle_timeout`` seconds (if set),
-        unless ``reconnect`` is False.
+        An INFO ID heartbeat is sent after ``keepalive`` seconds with
+        nothing received, one at a time (its reply is consumed internally,
+        never yielded); the connection is dropped and retried after
+        ``reconnect_delay`` seconds if nothing, data or keepalive reply,
+        arrives for ``idle_timeout`` seconds (if set), unless ``reconnect``
+        is False. Time spent by the caller between packets counts toward
+        neither. A v4 JSON ERROR packet is logged and skipped.
 
         Args:
             reconnect: If True (default), transparently reconnect and
@@ -490,20 +497,22 @@ class SeedLink(_SeedLinkBase):
             if not self._streaming:
                 self.negotiate()
             last_data_time = time.monotonic()
-            next_keepalive = (time.monotonic() + self._keepalive) if self._keepalive else None
+            next_keepalive = (last_data_time + self._keepalive) if self._keepalive else None
+            keepalive_pending = False
             while True:
                 if self._sock is None:
                     if not reconnect:
                         return
                     self._reconnect_after_delay()
                     last_data_time = time.monotonic()
-                    next_keepalive = (time.monotonic() + self._keepalive) if self._keepalive else None
+                    next_keepalive = (last_data_time + self._keepalive) if self._keepalive else None
+                    keepalive_pending = False
                     continue
 
-                # Without a socket timeout, a frame stalled mid-read would
-                # block forever; bound it by idle_timeout instead.
-                if self._timeout is None and self._idle_timeout and self._sock is not armed_sock:
-                    self._sock.settimeout(self._idle_timeout)
+                # Without a socket timeout, a frame stalled mid-read is
+                # bounded by idle_timeout instead (if set).
+                if self._timeout is None and self._sock is not armed_sock:
+                    self._sock.settimeout(self._idle_timeout or None)
                     armed_sock = self._sock
 
                 # Checked every pass, not just when nothing is readable, so
@@ -519,10 +528,10 @@ class SeedLink(_SeedLinkBase):
 
                 if not self._poll_readable(_POLL_INTERVAL):
                     now = time.monotonic()
-                    if next_keepalive is not None and now >= next_keepalive:
-                        next_keepalive = now + self._keepalive
+                    if next_keepalive is not None and not keepalive_pending and now >= next_keepalive:
                         try:
                             self._send_command(_commands.info("ID"))
+                            keepalive_pending = True
                         except SeedLinkError as e:
                             logger.warning("Connection to %s:%d lost: %s", self._host, self._port, e)
                             self.close()
@@ -532,6 +541,8 @@ class SeedLink(_SeedLinkBase):
                     frame = self._recv_frame()
                 except _UndecodablePacket as e:
                     logger.warning("Skipping undecodable packet seq=%s: %s", e.seqnum, e)
+                    if next_keepalive is not None:
+                        next_keepalive = time.monotonic() + self._keepalive
                     continue
                 except SeedLinkError as e:
                     self.close()
@@ -549,28 +560,34 @@ class SeedLink(_SeedLinkBase):
                     if not reconnect:
                         raise SeedLinkError(frame.message or "Stream error", frame.code)
                     continue
-                if self._is_json_error_frame(frame):  # v4 JSON ERROR packet
-                    message = self._json_error_message(frame.payload)
-                    logger.warning("Server error during streaming: %s", message)
-                    self.close()
-                    if not reconnect:
-                        raise SeedLinkError(message)
-                    continue
 
                 # Any received packet counts as activity, including keepalive
                 # replies, matching libslink's network timeout.
                 last_data_time = time.monotonic()
+                if next_keepalive is not None:
+                    next_keepalive = last_data_time + self._keepalive
+                if self._is_json_error_frame(frame):  # v4 JSON ERROR packet
+                    keepalive_pending = False
+                    logger.warning("Server error during streaming: %s",
+                                   self._json_error_message(frame.payload))
+                    continue
                 if self._is_info_frame(frame):
+                    if not frame.info_continues:
+                        keepalive_pending = False
                     continue  # our own (or an interleaved) INFO reply; never yielded
                 pkt = self._to_packet(frame)
                 self._update_stream_state(pkt)
                 yield pkt
+                # The caller's time handling the packet is not idle time
+                last_data_time = time.monotonic()
+                if next_keepalive is not None:
+                    next_keepalive = last_data_time + self._keepalive
         except GeneratorExit:
             self.close()
             raise
         finally:
             if armed_sock is not None and armed_sock is self._sock:
-                armed_sock.settimeout(None)
+                armed_sock.settimeout(_IO_TIMEOUT)
 
     # -- INFO -----------------------------------------------------------------
 

@@ -183,8 +183,9 @@ def parse_streamlist(text: str, default_selectors: str | None = None) -> list[St
 
     Selectors are split at the *first* colon in each entry (so a per-format
     filter suffix like ``:3`` in the selector itself is preserved), and are
-    themselves space-separated. Entries without an explicit selector use
-    ``default_selectors``.
+    themselves space-separated. Entries without an explicit selector, or
+    with an empty one, use ``default_selectors``. Entries with an empty
+    station ID are skipped.
 
     Example:
         ``"IU_KONO:B_H_E B_H_N,GE_WLF,MN_AQU:H_H_?"``
@@ -194,14 +195,12 @@ def parse_streamlist(text: str, default_selectors: str | None = None) -> list[St
         entry = entry.strip()
         if not entry:
             continue
-        station_id, sep, selector_str = entry.partition(":")
-        if sep:
-            selectors = selector_str.split()
-        elif default_selectors:
-            selectors = default_selectors.split()
-        else:
-            selectors = []
-        streams.append(Stream(station_id=station_id.strip(), selectors=selectors))
+        station_id, _, selector_str = entry.partition(":")
+        station_id = station_id.strip()
+        if not station_id:
+            continue
+        selectors = (selector_str or default_selectors or "").split()
+        streams.append(Stream(station_id=station_id, selectors=selectors))
     return streams
 
 

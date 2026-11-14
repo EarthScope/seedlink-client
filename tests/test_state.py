@@ -130,11 +130,32 @@ class TestLoadState:
         loaded = load_state(str(path))
         assert loaded == {"IU_COLA": (5, None)}
 
-    def test_malformed_line_skipped(self, tmp_path):
+    @pytest.mark.parametrize("line, reason", [
+        ("IU_COLA notanumber", "invalid sequence number"),
+        ("IU_COLA -5", "invalid sequence number"),
+        ("IU_COLA +5", "invalid sequence number"),
+        ("IU_COLA 1_000", "invalid sequence number"),
+        (f"IU_COLA {2**64}", "invalid sequence number"),
+        ("IU_COLA", "too few fields"),
+        ("IU_COLA 5 not-a-time", "invalid timestamp"),
+        ("IU_" + "A" * 19 + " 5", "station ID too long"),
+        ("IU_COLA 5 " + "x" * 190, "line too long"),
+    ])
+    def test_malformed_line_rejected(self, tmp_path, line, reason):
         path = tmp_path / "state.txt"
-        path.write_text("#V2 StationID  Sequence  [Timestamp]\nIU_COLA notanumber\nGE_WLF 5\n")
-        loaded = load_state(str(path))
-        assert loaded == {"GE_WLF": (5, None)}
+        path.write_text(f"#V2 StationID  Sequence  [Timestamp]\n{line}\nGE_WLF 5\n")
+        with pytest.raises(ValueError, match=f"{reason}.* on line 2"):
+            load_state(str(path))
+
+    def test_nanosecond_timestamp_accepted(self, tmp_path):
+        path = tmp_path / "state.txt"
+        path.write_text("#V2\nIU_COLA 5 2024-01-02T03:04:05.123456789Z\n")
+        assert load_state(str(path)) == {"IU_COLA": (5, "2024-01-02T03:04:05.123456789Z")}
+
+    def test_legacy_comma_timestamp_converted(self, tmp_path):
+        path = tmp_path / "state.txt"
+        path.write_text("IU COLA 5 2021,11,19,17,23,18\n")
+        assert load_state(str(path)) == {"IU_COLA": (5, "2021-11-19T17:23:18Z")}
 
     def test_binary_file_rejected(self, tmp_path):
         path = tmp_path / "state.txt"
@@ -145,7 +166,7 @@ class TestLoadState:
     def test_non_state_text_file_rejected(self, tmp_path):
         path = tmp_path / "state.txt"
         path.write_text("this is not\na state file\n")
-        with pytest.raises(ValueError, match="no state entries"):
+        with pytest.raises(ValueError, match="Not a valid state file"):
             load_state(str(path))
 
     def test_empty_file_accepted(self, tmp_path):

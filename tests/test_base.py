@@ -5,9 +5,11 @@ _init_transport are abstract)."""
 
 from __future__ import annotations
 
+import pytest
+
 from seedlink_client import _commands
 from seedlink_client.client import SeedLink
-from seedlink_client.protocol import Protocol, SeedLinkPacket
+from seedlink_client.protocol import Protocol, SeedLinkConfigError, SeedLinkPacket
 from seedlink_client.state import save_state
 from seedlink_client.streams import Stream, sort_streams
 
@@ -190,6 +192,39 @@ class TestWildcardExpansion:
         derived = next(s for s in sl.streams if s.station_id == "IU_ANMO")
         assert derived.selectors == ["B_H_Z", "L_H_Z", "H_H_Z"]
 
+    def test_negated_selectors_of_multiple_wildcards_not_tracked(self):
+        sl = self._client()
+        sl.add_stream("IU_*", "B_H_Z")
+        sl.add_stream("*_ANMO", "!B_H_Z")
+        sl._prepare_streams()
+        sl._update_stream_state(self._packet("IU_ANMO", 6000))
+        assert [s.station_id for s in sl.streams] == ["IU_*", "*_ANMO"]
+
+    def test_negated_selectors_of_one_wildcard_tracked(self):
+        sl = self._client()
+        sl.add_stream("IU_*", "!B_H_Z")
+        sl._prepare_streams()
+        sl._update_stream_state(self._packet("IU_ANMO", 6000))
+        derived = next(s for s in sl.streams if s.station_id == "IU_ANMO")
+        assert derived.selectors == ["!B_H_Z"]
+
+    @pytest.mark.parametrize("station_id", ["IU_AN MO", "IU_AN*", "IU_A.B", "IU_" + "A" * 19])
+    def test_unsupported_station_ids_not_tracked(self, station_id):
+        sl = self._client()
+        sl.add_stream("IU_*")
+        sl._prepare_streams()
+        sl._update_stream_state(self._packet(station_id, 1))
+        assert [s.station_id for s in sl.streams] == ["IU_*"]
+
+    def test_unsupported_recovered_station_ids_not_tracked(self, tmp_path):
+        path = tmp_path / "state.txt"
+        path.write_text("#V2\nIU_A.B 5\nIU_ANMO 6\n")
+        sl = self._client()
+        sl.recover_state(str(path))
+        sl.add_stream("IU_*")
+        sl._prepare_streams()
+        assert sorted(s.station_id for s in sl.streams) == ["IU_*", "IU_ANMO"]
+
     def test_derived_selectors_all_streams_if_any_wildcard_has_none(self):
         sl = self._client()
         sl.add_stream("IU_*", "B_H_Z")
@@ -215,7 +250,7 @@ class TestWildcardExpansion:
         lines = path.read_text().splitlines()[1:]
         assert sorted(lines) == ["II_* UNSET", "II_AAK 11", "II_BFO 20"]
 
-    def test_v3_uni_station_tracks_stations_but_negotiates_wildcard(self, tmp_path):
+    def test_v3_uni_station_does_not_track_received_stations(self, tmp_path):
         path = tmp_path / "state.txt"
         save_state(str(path), [Stream(station_id="*", seqnum=5),
                                Stream(station_id="II_AAK", seqnum=2)])
@@ -227,15 +262,14 @@ class TestWildcardExpansion:
             Protocol.V3, sort_streams(sl._streams), dialup=False, multistation=False,
             resume=True, lastpkttime=False, batch_active=False,
         )
-        assert [c.text for c in plan] == ["DATA 6"]
+        assert [c.text for c in plan] == ["DATA 000006"]
 
+        # Recovered stations are kept, but new ones are not added
         sl._update_stream_state(self._packet("II_AAK", 7))
         sl._update_stream_state(self._packet("GE_WLF", 8))
-        assert [(s.station_id, s.seqnum) for s in sl.streams] == [
-            ("*", 8), ("II_AAK", 7), ("GE_WLF", 8),
-        ]
+        assert [(s.station_id, s.seqnum) for s in sl.streams] == [("*", 8), ("II_AAK", 7)]
         sl.save_state(str(path))
-        assert path.read_text().splitlines()[1:] == ["* 8", "II_AAK 7", "GE_WLF 8"]
+        assert path.read_text().splitlines()[1:] == ["* 8", "II_AAK 7"]
 
     def test_v4_all_station_saves_wildcard_sequence(self, tmp_path):
         sl = self._client()
@@ -257,3 +291,24 @@ class TestWildcardExpansion:
             "STATION *", "DATA",
             "END",
         ]
+
+
+class TestStreamConfig:
+    def test_station_id_too_long_rejected(self):
+        sl = SeedLink()
+        with pytest.raises(SeedLinkConfigError, match="longer than 21"):
+            sl.add_stream("IU_" + "A" * 19)
+        sl.add_stream("IU_" + "A" * 18)
+
+    def test_streamlist_station_id_too_long_rejected(self):
+        sl = SeedLink()
+        with pytest.raises(SeedLinkConfigError):
+            sl.add_streamlist("IU_ANMO,IU_" + "A" * 19)
+        assert sl.streams == []
+
+    def test_empty_streamlist_file_rejected(self, tmp_path):
+        path = tmp_path / "streams.txt"
+        path.write_text("# nothing here\n\n")
+        sl = SeedLink()
+        with pytest.raises(SeedLinkConfigError, match="No streams defined"):
+            sl.add_streamlist_file(str(path))

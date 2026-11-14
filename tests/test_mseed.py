@@ -79,6 +79,24 @@ class TestDetectRecordLength:
         with pytest.raises(SeedLinkError):
             detect_record_length(b"not miniSEED data at all, just junk padding out to 64 bytes!!")
 
+    def test_oversized_record_length_raises(self):
+        record = bytearray(_make_info_record("<seedlink/>"))
+        record[54] = 21  # 2^21 bytes, over MAX_RECORD_LEN
+        with pytest.raises(SeedLinkError, match="exceeds limit"):
+            detect_record_length(bytes(record))
+
+    def test_record_without_b1000_found_by_next_v3_packet(self):
+        def without_b1000(seqnum):
+            record = bytearray(_make_info_record("<x/>", seqnum=seqnum))
+            record[39] = 0  # numblockettes
+            struct.pack_into(">H", record, 46, 0)
+            record[48:56] = bytes(8)
+            return bytes(record)
+
+        stream = without_b1000(1) + b"SL000002" + without_b1000(2)
+        assert detect_record_length(stream[:512]) is None
+        assert detect_record_length(stream) == (512, 2)
+
     def test_info_record_detected(self):
         record = _make_info_record("<seedlink/>")
         length, formatversion = detect_record_length(record)

@@ -46,6 +46,9 @@ MIN_PAYLOAD_DETECT = 64
 
 MAX_STATIONID = 21   # usable station ID length (libslink reserves 1 for NUL)
 
+# v4 sequence values reserved by the protocol: unset and all data
+_V4_RESERVED_SEQNUMS = frozenset({2**64 - 1, 2**64 - 2})
+
 # Bounded ceiling on a sent command line. The v4 spec states 255 bytes
 # including CRLF, but a real AUTH JWT token routinely exceeds that, and
 # servers in practice (e.g. ringserver) accept far longer lines -- so this
@@ -127,6 +130,15 @@ class SeedLinkAuthError(SeedLinkError):
 
     This is fatal and not retried: an authentication failure will not
     resolve itself by reconnecting with the same credentials.
+    """
+
+
+class SeedLinkConfigError(SeedLinkError):
+    """Raised when a failure is caused by the client's own configuration,
+    e.g. a forced protocol version the server refuses or an invalid
+    station ID or command.
+
+    Not retried on reconnect: the same configuration fails the same way.
     """
 
 
@@ -260,10 +272,10 @@ def parse_header_v3(buf: bytes) -> HeaderV3:
     if buf[:6] == INFO_SIGNATURE_V3:
         return HeaderV3(seqnum=None, is_info=True, info_continues=buf[7:8] == b"*")
     if buf[:2] == SIGNATURE_V3:
-        try:
-            seqnum = int(buf[2:8], 16)
-        except ValueError as e:
-            raise SeedLinkError(f"Invalid v3 sequence number: {buf[2:8]!r}") from e
+        seqbytes = bytes(buf[2:8])
+        if not all(c in b"0123456789abcdefABCDEF" for c in seqbytes):
+            raise SeedLinkError(f"Invalid v3 sequence number: {seqbytes!r}")
+        seqnum = int(seqbytes, 16)
         return HeaderV3(seqnum=seqnum, is_info=False, info_continues=False)
     raise SeedLinkError(f"Unrecognized v3 header signature: {buf[:2]!r}")
 
@@ -283,6 +295,8 @@ def parse_header_v4(buf: bytes) -> HeaderV4:
         raise SeedLinkError(
             f"Declared payload length {length} exceeds sanity limit {MAX_PAYLOAD_SIZE}"
         )
+    if seqnum in _V4_RESERVED_SEQNUMS:
+        raise SeedLinkError(f"Invalid v4 sequence number: {seqnum}")
     if sidlen > MAX_STATIONID:
         raise SeedLinkError(
             f"Declared station ID length {sidlen} exceeds sanity limit {MAX_STATIONID}"
@@ -471,31 +485,17 @@ def parse_hello(line1: str, line2: str) -> tuple[str, str, dict[str, str | bool]
 def select_protocol(protocol_majors: frozenset[str], requested: Protocol | None) -> Protocol:
     """Pick the protocol version to use for this connection.
 
-    Mirrors libslink's negotiation rule: promote to v4 whenever the server
-    advertises it, unless the caller pinned v3; otherwise use v3 if
-    advertised. A server that advertises nothing recognized is assumed to
-    speak v3 (the protocol predating the ``SLPROTO`` capability token).
-
-    Raises:
-        SeedLinkError: if ``requested`` pins a version the server does not
-            support, or if the server supports neither.
+    Mirrors libslink's negotiation rule: use a version pinned by the
+    caller as is, leaving the server to accept or reject ``SLPROTO``;
+    otherwise promote to v4 whenever the server advertises it. A server
+    that advertises no recognized version is assumed to speak v3 (the
+    protocol predating the ``SLPROTO`` capability token).
     """
-    supports_v3 = "3" in protocol_majors or not protocol_majors
-    supports_v4 = "4" in protocol_majors
-
-    if requested is Protocol.V3:
-        if supports_v3:
-            return Protocol.V3
-        raise SeedLinkError("Server does not support SeedLink v3")
-    if requested is Protocol.V4:
-        if supports_v4:
-            return Protocol.V4
-        raise SeedLinkError("Server does not support SeedLink v4")
-    if supports_v4:
+    if requested is not None:
+        return requested
+    if "4" in protocol_majors:
         return Protocol.V4
-    if supports_v3:
-        return Protocol.V3
-    raise SeedLinkError("No supported protocol version found")
+    return Protocol.V3
 
 
 def parse_info_xml(text: str) -> dict[str, Any]:

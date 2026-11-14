@@ -309,7 +309,10 @@ def _configure_streams(sl: SeedLink, args) -> None:
     if args.streams:
         sl.add_streamlist(args.streams, default_selectors=args.selectors)
     elif args.list_file:
-        sl.add_streamlist_file(args.list_file, default_selectors=args.selectors)
+        try:
+            sl.add_streamlist_file(args.list_file, default_selectors=args.selectors)
+        except ValueError as e:
+            raise SeedLinkError(f"Cannot read stream list file {args.list_file!r}: {e}") from e
     elif args.selectors:
         sl.set_all_stations(selectors=args.selectors)
     if args.timewindow:
@@ -751,7 +754,7 @@ def _build_parser():
         "times may be ISO 8601 or comma-delimited, separated by '/' if both given",
     )
     parser.add_argument("-x", "--statefile", metavar="FILE", help="Save/restore stream sequence numbers to this file")
-    parser.add_argument("-k", "--keepalive", type=float, metavar="SECS", help="Send an INFO ID heartbeat this often")
+    parser.add_argument("-k", "--keepalive", type=float, metavar="SECS", help="Send an INFO ID heartbeat after this long with no data")
     parser.add_argument(
         "-nd", "--netdelay", type=float, default=30.0, metavar="SECS", help="Reconnection delay (default: 30)"
     )

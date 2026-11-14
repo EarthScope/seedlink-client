@@ -57,6 +57,11 @@ class TestParseHeaderV3:
 
 
 class TestDecodeFrameV3:
+    @pytest.mark.parametrize("seq", [b"-00001", b"+0001F", b" 0001F", b"00_01F", b"00001G"])
+    def test_invalid_sequence_raises(self, seq):
+        with pytest.raises(SeedLinkError, match="Invalid v3 sequence"):
+            parse_header_v3(b"SL" + seq)
+
     def test_unparsable_record_raises_undecodable_with_seqnum(self):
         header = parse_header_v3(b"SL00002A")
         with pytest.raises(_UndecodablePacket) as excinfo:
@@ -83,6 +88,11 @@ class TestParseHeaderV4:
     def test_bad_signature_raises(self):
         with pytest.raises(SeedLinkError):
             parse_header_v4(self._build().replace(b"SE", b"XX", 1))
+
+    @pytest.mark.parametrize("seqnum", [2**64 - 1, 2**64 - 2])
+    def test_reserved_sequence_raises(self, seqnum):
+        with pytest.raises(SeedLinkError, match="Invalid v4 sequence"):
+            parse_header_v4(self._build(seqnum=seqnum))
 
     def test_oversized_length_raises(self):
         with pytest.raises(SeedLinkError):
@@ -227,13 +237,14 @@ class TestSelectProtocol:
     def test_caller_pins_v3_despite_v4_support(self):
         assert select_protocol(frozenset({"3", "4"}), Protocol.V3) is Protocol.V3
 
-    def test_caller_pins_v4_not_supported_raises(self):
-        with pytest.raises(SeedLinkError):
-            select_protocol(frozenset({"3"}), Protocol.V4)
+    def test_caller_pins_v4_not_advertised(self):
+        assert select_protocol(frozenset({"3"}), Protocol.V4) is Protocol.V4
 
-    def test_caller_pins_v3_not_supported_raises(self):
-        with pytest.raises(SeedLinkError):
-            select_protocol(frozenset({"4"}), Protocol.V3)
+    def test_caller_pins_v3_not_advertised(self):
+        assert select_protocol(frozenset({"4"}), Protocol.V3) is Protocol.V3
+
+    def test_unrecognized_versions_default_v3(self):
+        assert select_protocol(frozenset({"5"}), None) is Protocol.V3
 
 
 class TestParseInfoXml:

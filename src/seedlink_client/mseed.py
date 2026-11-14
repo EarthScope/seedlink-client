@@ -11,7 +11,7 @@ from __future__ import annotations
 from pymseed import MiniSEEDError, MS3Record, sourceid2nslc
 from pymseed.clib import buffer_pointer, clibmseed, ffi
 
-from .protocol import SeedLinkError
+from .protocol import HEADSIZE_V3, MAX_RECORD_LEN, MIN_PAYLOAD_DETECT, SIGNATURE_V3, SeedLinkError
 
 
 def detect_record_length(buf: bytes) -> tuple[int, int] | None:
@@ -31,16 +31,40 @@ def detect_record_length(buf: bytes) -> tuple[int, int] | None:
         read more bytes and retry).
 
     Raises:
-        SeedLinkError: if the buffer does not look like a miniSEED record.
+        SeedLinkError: if the buffer does not look like a miniSEED record,
+            or its length exceeds MAX_RECORD_LEN.
     """
     buf_ptr = buffer_pointer(buf)
     formatversion = ffi.new("uint8_t *")
     reclen = clibmseed.ms3_detect(buf_ptr, len(buf_ptr), formatversion)
     if reclen < 0:
         raise SeedLinkError("Payload does not look like a miniSEED record")
+    if reclen == 0 and formatversion[0] == 2:
+        reclen = _next_v3_record_offset(buf)
     if reclen == 0:
         return None
+    if reclen > MAX_RECORD_LEN:
+        raise SeedLinkError(f"miniSEED record length {reclen} exceeds limit {MAX_RECORD_LEN}")
     return reclen, formatversion[0]
+
+
+def _next_v3_record_offset(buf: bytes) -> int:
+    """Find a miniSEED 2 record without a Blockette 1000 by the start of the
+    next one, at a 64-byte offset, preceded by its v3 SeedLink header.
+
+    libmseed only searches for a next record immediately following, which a
+    v3 stream never has. Returns the offset, or 0 if none is found yet.
+    """
+    formatversion = ffi.new("uint8_t *")
+    offset = 64
+    while offset + HEADSIZE_V3 + MIN_PAYLOAD_DETECT <= len(buf):
+        if buf[offset:offset + 2] == SIGNATURE_V3:
+            nextrec = buffer_pointer(buf[offset + HEADSIZE_V3:])
+            if (clibmseed.ms3_detect(nextrec, len(nextrec), formatversion) >= 0
+                    and formatversion[0] == 2):
+                return offset
+        offset += 64
+    return 0
 
 
 def parse_record(payload: bytes) -> MS3Record:

@@ -10,13 +10,21 @@ from seedlink_client._commands import (
     NegotiationWalk,
     auth_jwt,
     auth_userpass,
+    batch,
     encode,
     plan_handshake,
     plan_negotiation,
+    slproto,
     station_v3,
     station_v4,
 )
-from seedlink_client.protocol import MAX_COMMAND_LEN, Protocol, SeedLinkError
+from seedlink_client.protocol import (
+    MAX_COMMAND_LEN,
+    Protocol,
+    SeedLinkAuthError,
+    SeedLinkConfigError,
+    SeedLinkError,
+)
 from seedlink_client.streams import Stream
 
 
@@ -94,7 +102,7 @@ class TestPlanHandshake:
         assert not any(c.text == "BATCH" for c in cmds)
 
     def test_username_with_space_rejected(self):
-        with pytest.raises(SeedLinkError):
+        with pytest.raises(SeedLinkConfigError):
             plan_handshake(Protocol.V4, {}, None, None, ("bad user", "pw"), want_batch=False)
 
 
@@ -338,19 +346,19 @@ class TestPlanNegotiationV3Multi:
         assert station_cmd.text == "STATION KONO IU"
         assert station_cmd.terminator == b"\r\n"
 
-    def test_data_sequence_is_unpadded_hex(self):
+    def test_data_sequence_is_zero_padded_hex(self):
         streams = [Stream(station_id="IU_KONO", seqnum=0x64)]  # 100 decimal
         cmds = plan_negotiation(Protocol.V3, streams, dialup=False, multistation=True,
                                  resume=True, lastpkttime=True, batch_active=False)
         data_cmd = next(c for c in cmds if c.role == "data")
-        assert data_cmd.text == "DATA 65"  # 101 decimal -> unpadded hex
+        assert data_cmd.text == "DATA 000065"  # 101 decimal -> 6 hex digits
 
     def test_data_sequence_wraps_at_24_bits(self):
         streams = [Stream(station_id="IU_KONO", seqnum=0xFFFFFF)]
         cmds = plan_negotiation(Protocol.V3, streams, dialup=False, multistation=True,
                                  resume=True, lastpkttime=False, batch_active=False)
         data_cmd = next(c for c in cmds if c.role == "data")
-        assert data_cmd.text == "DATA 0"
+        assert data_cmd.text == "DATA 000000"
 
     def test_dialup_uses_fetch(self):
         streams = [Stream(station_id="IU_KONO")]
@@ -364,7 +372,7 @@ class TestPlanNegotiationV3Multi:
         cmds = plan_negotiation(Protocol.V3, streams, dialup=False, multistation=True,
                                  resume=True, lastpkttime=True, batch_active=False)
         data_cmd = next(c for c in cmds if c.role == "data")
-        assert data_cmd.text == "DATA 65 2024,1,1,0,0,0"
+        assert data_cmd.text == "DATA 000065 2024,1,1,0,0,0"
 
     def test_malformed_saved_timestamp_is_dropped_not_fatal(self, caplog):
         # A hand-edited or truncated state file's timestamp field must not
@@ -375,7 +383,7 @@ class TestPlanNegotiationV3Multi:
             cmds = plan_negotiation(Protocol.V3, streams, dialup=False, multistation=True,
                                      resume=True, lastpkttime=True, batch_active=False)
         data_cmd = next(c for c in cmds if c.role == "data")
-        assert data_cmd.text == "DATA 65"
+        assert data_cmd.text == "DATA 000065"
         assert "IU_KONO" in caplog.text
 
     def test_time_window_uses_time_command(self):
@@ -454,7 +462,7 @@ class TestPlanNegotiationV3Uni:
         streams = [Stream(station_id="IU_KONO", seqnum=9), Stream(station_id="*", seqnum=4)]
         cmds = plan_negotiation(Protocol.V3, streams, dialup=False, multistation=False,
                                  resume=True, lastpkttime=False, batch_active=False)
-        assert [c.text for c in cmds] == ["DATA 5"]
+        assert [c.text for c in cmds] == ["DATA 000005"]
 
 
 class TestPlanNegotiationTolerated:
@@ -469,3 +477,37 @@ class TestPlanNegotiationTolerated:
             ("STATION IU_*", False), ("DATA", False),
             ("END", False),
         ]
+
+
+class TestHandshakeReplies:
+    def test_batch_ok_and_error_accepted(self):
+        assert batch().parse("OK")
+        assert not batch().parse("ERROR")
+
+    def test_batch_invalid_reply_raises(self):
+        with pytest.raises(SeedLinkError, match="Invalid response"):
+            batch().parse("WHAT")
+
+    def test_auth_error_is_auth_failure(self):
+        with pytest.raises(SeedLinkAuthError):
+            auth_jwt("token").parse("ERROR AUTH bad token")
+
+    def test_auth_invalid_reply_is_not_auth_failure(self):
+        with pytest.raises(SeedLinkError) as excinfo:
+            auth_jwt("token").parse("WHAT")
+        assert not isinstance(excinfo.value, SeedLinkAuthError)
+
+    def test_forced_slproto_rejection_is_config_error(self):
+        cmds = plan_handshake(Protocol.V4, {}, None, None, None, want_batch=False,
+                              protocol_forced=True)
+        with pytest.raises(SeedLinkConfigError):
+            cmds[0].parse("ERROR UNSUPPORTED")
+
+    def test_slproto_rejection_is_retryable(self):
+        with pytest.raises(SeedLinkError) as excinfo:
+            slproto("4.0").parse("ERROR UNSUPPORTED")
+        assert not isinstance(excinfo.value, SeedLinkConfigError)
+
+    def test_v3_station_not_net_sta_is_config_error(self):
+        with pytest.raises(SeedLinkConfigError):
+            station_v3("ANMO", expect_reply=True)

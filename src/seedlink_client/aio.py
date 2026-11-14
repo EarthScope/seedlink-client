@@ -28,7 +28,7 @@ from collections.abc import AsyncGenerator
 from typing import Any
 
 from . import _commands, mseed
-from ._base import _SeedLinkBase
+from ._base import _CONNECT_TIMEOUT, _IO_TIMEOUT, _TLS_HANDSHAKE_TIMEOUT, _SeedLinkBase
 from ._commands import Command
 from .protocol import (
     FORMAT_JSON,
@@ -39,6 +39,7 @@ from .protocol import (
     MIN_PAYLOAD_DETECT,
     Protocol,
     SeedLinkAuthError,
+    SeedLinkConfigError,
     SeedLinkError,
     SeedLinkPacket,
     SeedLinkResponse,
@@ -102,11 +103,15 @@ class AsyncSeedLink(_SeedLinkBase):
         if self._writer is not None:
             raise SeedLinkError("Already connected")
         try:
-            reader, writer = await asyncio.open_connection(
-                self._host, self._port,
-                ssl=self._ssl_context() if self._tls else None,
-                server_hostname=self._host if self._tls else None,
-            )
+            async with self._io_scope(_CONNECT_TIMEOUT + (_TLS_HANDSHAKE_TIMEOUT if self._tls else 0)):
+                reader, writer = await asyncio.open_connection(
+                    self._host, self._port,
+                    ssl=self._ssl_context() if self._tls else None,
+                    server_hostname=self._host if self._tls else None,
+                    ssl_handshake_timeout=_TLS_HANDSHAKE_TIMEOUT if self._tls else None,
+                )
+        except TimeoutError as e:
+            raise SeedLinkTimeout(f"Timed out connecting to {self._host}:{self._port}") from e
         except ssl.SSLCertVerificationError as e:
             raise SeedLinkError(
                 f"TLS certificate verification failed for {self._host}:{self._port}: "
@@ -134,8 +139,8 @@ class AsyncSeedLink(_SeedLinkBase):
         and upgrade explicitly instead.
         """
         await self._send_command(_commands.hello())
-        line1 = await self._read_line()
-        line2 = await self._read_line()
+        line1 = await self._read_reply()
+        line2 = await self._read_reply()
         logger.debug("<-- %s", line1)
         logger.debug("<-- %s", line2)
         self._store_identity(line1, line2)
@@ -167,6 +172,7 @@ class AsyncSeedLink(_SeedLinkBase):
                     handshake_cmds = _commands.plan_handshake(
                         self.protocol, self.server_capabilities, self._clientname,
                         self._clientversion, self._auth, self._want_batch,
+                        protocol_forced=self._requested_protocol is not None,
                     )
                     for cmd in handshake_cmds:
                         resp = await self._send_command(cmd)
@@ -237,6 +243,11 @@ class AsyncSeedLink(_SeedLinkBase):
         """Context manager applying ``self._timeout`` if set, else a no-op."""
         return asyncio.timeout(self._timeout) if self._timeout is not None else _NoTimeout()
 
+    def _io_scope(self, limit: float):
+        """Context manager bounding one I/O step by ``limit`` when no
+        ``self._timeout`` is set, else a no-op (``_timeout_scope`` applies)."""
+        return asyncio.timeout(limit) if self._timeout is None else _NoTimeout()
+
     # -- Byte-level transport ----------------------------------------------
 
     async def _ensure(self, n: int) -> None:
@@ -297,16 +308,30 @@ class AsyncSeedLink(_SeedLinkBase):
         wire = _commands.encode(cmd)
         logger.debug("--> %s", cmd.display_text)
         try:
-            self._writer.write(wire)
-            await self._writer.drain()
+            async with self._io_scope(_IO_TIMEOUT):
+                self._writer.write(wire)
+                await self._writer.drain()
         except OSError as e:
             await self.close()
             raise SeedLinkError(f"send failed: {e}") from e
+        except TimeoutError as e:
+            await self.close()
+            raise SeedLinkTimeout(f"Timed out sending {cmd.display_text}") from e
         if cmd.parse is None:
             return None
-        line = await self._read_line()
+        line = await self._read_reply()
         logger.debug("<-- %s", line)
         return cmd.parse(line)
+
+    async def _read_reply(self) -> str:
+        """Read a command's reply line, bounded by _IO_TIMEOUT when no
+        ``self._timeout`` is set."""
+        try:
+            async with self._io_scope(_IO_TIMEOUT):
+                return await self._read_line()
+        except TimeoutError as e:
+            await self.close()
+            raise SeedLinkTimeout("Timed out waiting for a reply") from e
 
     async def _send_pipelined(self, cmds: list[Command]) -> None:
         """Send commands that each expect a reply without waiting for each
@@ -322,15 +347,19 @@ class AsyncSeedLink(_SeedLinkBase):
             for cmd in window:
                 logger.debug("--> %s", cmd.display_text)
             try:
-                self._writer.write(wire)
-                await self._writer.drain()
+                async with self._io_scope(_IO_TIMEOUT):
+                    self._writer.write(wire)
+                    await self._writer.drain()
             except OSError as e:
                 await self.close()
                 raise SeedLinkError(f"send failed: {e}") from e
+            except TimeoutError as e:
+                await self.close()
+                raise SeedLinkTimeout("Timed out sending negotiation commands") from e
             error: SeedLinkError | None = None
             for cmd in window:
                 try:
-                    line = await self._read_line()
+                    line = await self._read_reply()
                 except SeedLinkError:
                     if error is None:
                         raise
@@ -465,7 +494,7 @@ class AsyncSeedLink(_SeedLinkBase):
                 await self.connect()
                 await self.negotiate()
                 return
-            except SeedLinkAuthError:
+            except (SeedLinkAuthError, SeedLinkConfigError):
                 raise
             except SeedLinkError as e:
                 logger.warning("Reconnect to %s:%d failed: %s; retrying in %.0fs",
@@ -489,14 +518,16 @@ class AsyncSeedLink(_SeedLinkBase):
             if not self._streaming:
                 await self.negotiate()
             last_data_time = time.monotonic()
-            next_keepalive = (time.monotonic() + self._keepalive) if self._keepalive else None
+            next_keepalive = (last_data_time + self._keepalive) if self._keepalive else None
+            keepalive_pending = False
             while True:
                 if self._writer is None:
                     if not reconnect:
                         return
                     await self._reconnect_after_delay()
                     last_data_time = time.monotonic()
-                    next_keepalive = (time.monotonic() + self._keepalive) if self._keepalive else None
+                    next_keepalive = (last_data_time + self._keepalive) if self._keepalive else None
+                    keepalive_pending = False
                     continue
 
                 # Checked every pass, not just on a poll timeout, so traffic
@@ -520,10 +551,10 @@ class AsyncSeedLink(_SeedLinkBase):
                     await asyncio.wait_for(self._ensure(1), timeout=_POLL_INTERVAL)
                 except TimeoutError:
                     now = time.monotonic()
-                    if next_keepalive is not None and now >= next_keepalive:
-                        next_keepalive = now + self._keepalive
+                    if next_keepalive is not None and not keepalive_pending and now >= next_keepalive:
                         try:
                             await self._send_command(_commands.info("ID"))
+                            keepalive_pending = True
                         except SeedLinkError as e:
                             logger.warning("Connection to %s:%d lost: %s", self._host, self._port, e)
                             await self.close()
@@ -543,6 +574,8 @@ class AsyncSeedLink(_SeedLinkBase):
                         frame = await self._recv_frame()
                 except _UndecodablePacket as e:
                     logger.warning("Skipping undecodable packet seq=%s: %s", e.seqnum, e)
+                    if next_keepalive is not None:
+                        next_keepalive = time.monotonic() + self._keepalive
                     continue
                 except SeedLinkError as e:
                     await self.close()
@@ -567,22 +600,28 @@ class AsyncSeedLink(_SeedLinkBase):
                     if not reconnect:
                         raise SeedLinkError(frame.message or "Stream error", frame.code)
                     continue
-                if self._is_json_error_frame(frame):  # v4 JSON ERROR packet
-                    message = self._json_error_message(frame.payload)
-                    logger.warning("Server error during streaming: %s", message)
-                    await self.close()
-                    if not reconnect:
-                        raise SeedLinkError(message)
-                    continue
 
                 # Any received packet counts as activity, including keepalive
                 # replies, matching libslink's network timeout.
                 last_data_time = time.monotonic()
+                if next_keepalive is not None:
+                    next_keepalive = last_data_time + self._keepalive
+                if self._is_json_error_frame(frame):  # v4 JSON ERROR packet
+                    keepalive_pending = False
+                    logger.warning("Server error during streaming: %s",
+                                   self._json_error_message(frame.payload))
+                    continue
                 if self._is_info_frame(frame):
+                    if not frame.info_continues:
+                        keepalive_pending = False
                     continue  # our own (or an interleaved) INFO reply; never yielded
                 pkt = self._to_packet(frame)
                 self._update_stream_state(pkt)
                 yield pkt
+                # The caller's time handling the packet is not idle time
+                last_data_time = time.monotonic()
+                if next_keepalive is not None:
+                    next_keepalive = last_data_time + self._keepalive
         except (asyncio.CancelledError, GeneratorExit):
             await self.close()
             raise

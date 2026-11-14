@@ -14,6 +14,8 @@ implements :meth:`_init_transport` (its connection handle) and
 from __future__ import annotations
 
 import json
+import logging
+import re
 from datetime import datetime
 
 from . import state, streams
@@ -21,9 +23,11 @@ from .protocol import (
     DEFAULT_PORT,
     FORMAT_JSON,
     FORMAT_XML,
+    MAX_STATIONID,
     SUBFORMAT_JSON_ERROR,
     SUBFORMAT_JSON_INFO,
     Protocol,
+    SeedLinkConfigError,
     SeedLinkError,
     SeedLinkPacket,
     _RawFrame,
@@ -33,10 +37,21 @@ from .protocol import TLS_PORT as _TLS_PORT
 from .streams import Stream
 from .time_utils import parse_timestring
 
+logger = logging.getLogger(__name__)
+
 # Default/minimum size of the persistent receive buffer. It grows to fit an
 # oversized payload but is released back to this size once drained, so one
 # large packet doesn't pin that memory for the life of the connection.
 _RECV_BUF_SIZE = 65536
+
+# I/O limits used when no timeout is given: TCP connect, TLS handshake, and
+# each command send or reply read.
+_CONNECT_TIMEOUT = 10.0
+_TLS_HANDSHAKE_TIMEOUT = 60.0
+_IO_TIMEOUT = 30.0
+
+# Station IDs received via a wildcard that are tracked as their own stream
+_TRACKABLE_STATION_ID = re.compile(rf"[A-Za-z0-9_-]{{1,{MAX_STATIONID}}}\Z")
 
 
 class _SeedLinkBase:
@@ -46,19 +61,22 @@ class _SeedLinkBase:
         host:       Server hostname or IP address.
         port:       Server TCP port (typically 18000, or 18500 for TLS).
         timeout:    Optional socket timeout in seconds for connect and
-                    command I/O. None means block indefinitely. Applied
-                    per socket operation on the sync client; on
-                    :class:`~seedlink_client.aio.AsyncSeedLink` it is a
-                    single deadline covering an entire ``connect()``/
-                    ``negotiate()``/``info()`` call instead.
+                    command I/O. Applied per socket operation on the sync
+                    client; on :class:`~seedlink_client.aio.AsyncSeedLink`
+                    it is a single deadline covering an entire
+                    ``connect()``/``negotiate()``/``info()`` call instead.
+                    None applies default limits per operation: 10s to
+                    connect, 60s for the TLS handshake, and 30s for each
+                    command send or reply.
         tls:        Enable TLS encryption. If None (default), TLS is
                     auto-enabled when port is 18500.
         tls_noverify: If True, disable TLS certificate verification
                       (insecure; useful for self-signed certificates).
         protocol:   Pin the protocol version (``Protocol.V3``/``V4``)
                     instead of negotiating automatically.
-        keepalive:  Send an INFO ID heartbeat this often (seconds) while
-                    streaming. None disables keepalives.
+        keepalive:  Send an INFO ID heartbeat after this long (seconds)
+                    with nothing received while streaming. None disables
+                    keepalives.
         idle_timeout: Reconnect if no packets, including keepalive replies,
                     arrive for this long (seconds).
                     0 or None disables it.
@@ -252,8 +270,10 @@ class _SeedLinkBase:
         if cached is None:
             cached = [s for s in self._streams if s.matches(station_id)]
             # Track each station seen under a wildcard as its own stream too,
-            # so it resumes from its own sequence.
-            if station_id and not any(s.station_id == station_id for s in cached):
+            # so it resumes from its own sequence. Not in v3 uni-station
+            # mode, which negotiates only the wildcard.
+            tracking = self._multistation or self.protocol is not Protocol.V3
+            if tracking and station_id and not any(s.station_id == station_id for s in cached):
                 derived = self._derive_stream(station_id)
                 if derived is not None:
                     cached.append(derived)
@@ -268,15 +288,27 @@ class _SeedLinkBase:
 
         Selectors are merged without duplicates; a matching wildcard with
         no selectors (all streams) means the new stream has none either.
+        Not tracked, returning None, is a station ID with characters other
+        than letters, digits, '_' and '-' or longer than MAX_STATIONID, or
+        one matching multiple wildcards with negated selectors, which
+        cannot be combined.
         """
         matching = [s for s in self._streams
                     if streams.is_wildcard(s.station_id) and s.matches(station_id)]
         if not matching:
             return None
-        if all(w.selectors for w in matching):
-            selectors = list(dict.fromkeys(sel for w in matching for sel in w.selectors))
-        else:
+        if not _TRACKABLE_STATION_ID.match(station_id):
+            logger.info("Not tracking station ID with unsupported characters or length: %r",
+                        station_id)
+            return None
+        if not all(w.selectors for w in matching):
             selectors = []
+        elif len(matching) > 1 and any(sel.startswith("!") for w in matching for sel in w.selectors):
+            logger.info("Not tracking %s, negated selectors of multiple wildcard entries",
+                        station_id)
+            return None
+        else:
+            selectors = list(dict.fromkeys(sel for w in matching for sel in w.selectors))
         stream = Stream(station_id=station_id, selectors=selectors, seqnum=seqnum,
                         all_data=any(w.all_data for w in matching), timestamp=timestamp)
         self._streams.append(stream)
@@ -406,6 +438,16 @@ class _SeedLinkBase:
                 self._derive_stream(station_id, seqnum, timestamp)
         self._match_cache.clear()
 
+    @staticmethod
+    def _check_station_ids(new_streams: list[Stream]) -> None:
+        for stream in new_streams:
+            if not stream.station_id:
+                raise SeedLinkConfigError("Station ID must not be empty")
+            if len(stream.station_id) > MAX_STATIONID:
+                raise SeedLinkConfigError(
+                    f"Station ID longer than {MAX_STATIONID} characters: {stream.station_id!r}"
+                )
+
     def add_stream(
         self,
         station_id: str,
@@ -429,6 +471,7 @@ class _SeedLinkBase:
         sels = selectors.split() if isinstance(selectors, str) else list(selectors or [])
         stream = Stream(station_id=station_id, selectors=sels, seqnum=seqnum,
                          all_data=all_data, timestamp=timestamp)
+        self._check_station_ids([stream])
         self._streams.append(stream)
         self._apply_recovered_state([stream])
         self._multistation = True
@@ -461,6 +504,7 @@ class _SeedLinkBase:
         if self._all_stations:
             raise SeedLinkError("Cannot mix add_streamlist() with set_all_stations()")
         new_streams = streams.parse_streamlist(text, default_selectors)
+        self._check_station_ids(new_streams)
         self._streams.extend(new_streams)
         self._apply_recovered_state(new_streams)
         self._multistation = True
@@ -471,6 +515,9 @@ class _SeedLinkBase:
         if self._all_stations:
             raise SeedLinkError("Cannot mix add_streamlist_file() with set_all_stations()")
         new_streams = streams.read_streamlist_file(path, default_selectors)
+        if not new_streams:
+            raise SeedLinkConfigError(f"No streams defined in stream list file {path!r}")
+        self._check_station_ids(new_streams)
         self._streams.extend(new_streams)
         self._apply_recovered_state(new_streams)
         self._multistation = True

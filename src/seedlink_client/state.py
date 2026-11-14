@@ -10,9 +10,14 @@ from __future__ import annotations
 import os
 import secrets
 
+from .protocol import MAX_STATIONID
 from .streams import Stream, is_wildcard
+from .time_utils import parse_timestring, to_iso_timestring
 
 _HEADER_V2 = "#V2 StationID  Sequence  [Timestamp]"
+
+# Longest state file line accepted, excluding the line terminator
+_MAX_LINE_LEN = 199
 
 
 def save_state(path: str, streams: list[Stream], multistation: bool = False) -> None:
@@ -78,15 +83,16 @@ def load_state(path: str) -> dict[str, tuple[int | None, str | None]]:
     libslink's legacy headerless format, ``NET STA seq [timestamp]``
     (station ID becomes ``NET_STA``); the legacy uni-station entry
     ``XX UNI`` maps to station ID ``'*'``. A missing sequence number is
-    represented as ``UNSET`` or ``-1`` in either format. Unparsable lines
-    are skipped.
+    represented as ``UNSET`` or ``-1`` in either format. A legacy
+    comma-delimited timestamp is converted to ISO format.
 
     Unlike libslink's ``sl_recoverstate()``, this does not require streams
     to already be configured -- state may be loaded before or after
     stream setup.
 
-    Raises ValueError if the file is not text, or is headerless with
-    content but no parsable entries.
+    Raises ValueError if the file is not text, or has a line that is too
+    long, has too few fields, or has an invalid station ID, sequence
+    number or timestamp.
     """
     state: dict[str, tuple[int | None, str | None]] = {}
     try:
@@ -97,31 +103,46 @@ def load_state(path: str) -> dict[str, tuple[int | None, str | None]]:
             f"Not a valid state file: {path!r} (undecodable byte at offset {e.start})"
         ) from e
 
+    def invalid(reason: str, lineno: int) -> ValueError:
+        return ValueError(f"Not a valid state file: {path!r} ({reason} on line {lineno})")
+
     is_v2 = bool(lines) and lines[0].startswith("#V2")
-    has_content = False
-    for line in lines[1:] if is_v2 else lines:
+    for lineno, line in enumerate(lines, start=1):
+        if lineno == 1 and is_v2:
+            continue
+        line = line.rstrip("\r")
+        if len(line) > _MAX_LINE_LEN:
+            raise invalid("line too long", lineno)
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        has_content = True
         fields = line.split()
         if is_v2:
             if len(fields) < 2:
-                continue
+                raise invalid("too few fields", lineno)
             station_id, seq_str = fields[0], fields[1]
             timestamp = fields[2] if len(fields) > 2 else None
         else:
             # Legacy: "NET STA seq [timestamp]"; "XX UNI" is the uni-station entry.
             if len(fields) < 3:
-                continue
+                raise invalid("too few fields", lineno)
             net, sta, seq_str = fields[0], fields[1], fields[2]
             station_id = "*" if (net, sta) == ("XX", "UNI") else f"{net}_{sta}"
             timestamp = fields[3] if len(fields) > 3 else None
-        try:
-            seqnum = None if seq_str in ("UNSET", "-1") else int(seq_str)
-        except ValueError:
-            continue
+        if len(station_id) > MAX_STATIONID:
+            raise invalid("station ID too long", lineno)
+        if seq_str in ("UNSET", "-1"):
+            seqnum = None
+        elif seq_str.isascii() and seq_str.isdigit() and int(seq_str) < 2**64:
+            seqnum = int(seq_str)
+        else:
+            raise invalid(f"invalid sequence number {seq_str!r}", lineno)
+        if timestamp is not None:
+            try:
+                parsed = parse_timestring(timestamp)
+            except ValueError:
+                raise invalid(f"invalid timestamp {timestamp!r}", lineno) from None
+            if "," in timestamp:
+                timestamp = to_iso_timestring(parsed)
         state[station_id] = (seqnum, timestamp)
-    if has_content and not is_v2 and not state:
-        raise ValueError(f"Not a valid state file: {path!r} (no state entries)")
     return state

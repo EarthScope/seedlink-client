@@ -27,6 +27,28 @@
 - Fail negotiation on a reply that is neither OK nor ERROR, rather than treating it as a rejection
 - Report an unreadable or invalid state file as an error before connecting, without overwriting it
 - Include the station ID in verbose packet lines
+- Track only stations received via a wildcard whose IDs contain letters, digits, underscores and dashes
+- Do not combine negated selectors of multiple wildcard station IDs for a tracked station
+- Do not track stations received via a wildcard in v3 uni-station mode
+- Reject station IDs longer than 21 characters when adding streams
+- Skip stream list entries with an empty station ID, and use the default selectors for an empty selector
+- Report an empty stream list file as an error instead of requesting all stations
+- Report an undecodable stream list file as a CLI error instead of a traceback
+- Fail the connection on a BATCH reply that is neither OK nor ERROR
+- Treat only an AUTH ERROR reply as an authentication failure; retry on any other invalid reply
+- Reject v3 packet sequence numbers that are not 6 hex digits
+- Reject v3 miniSEED records longer than 1 MiB
+- Reject v4 packets carrying a reserved sequence number
+- Detect the length of v3 miniSEED records without a Blockette 1000 from the next packet header
+- Do not count the caller's time between packets toward the idle timeout
+- Stop instead of reconnecting forever on configuration errors, e.g. a rejected forced protocol or invalid station ID
+- Log and skip v4 JSON ERROR packets during streaming instead of reconnecting
+- Fall back to v3 when the server advertises no recognized protocol version
+- Send SLPROTO for a forced protocol version even when the server does not advertise it
+- Report malformed state file lines as errors, and convert legacy comma-delimited timestamps to ISO
+- Zero-pad v3 DATA/FETCH sequence numbers to 6 hex digits, matching the protocol specification
+- Send keepalives only after the keepalive interval with no data, one at a time
+- Bound connect, TLS handshake, and command I/O by default limits when no timeout is set
 - Report the CLI as seedlink-client-cli in USERAGENT to distinguish it from the library
 - Require pymseed >=1.0.1,<2
 

@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from seedlink_client._base import _IO_TIMEOUT
 from seedlink_client.client import SeedLink
 from seedlink_client.protocol import (
     FORMAT_JSON,
@@ -17,6 +18,7 @@ from seedlink_client.protocol import (
     SUBFORMAT_JSON_INFO,
     Protocol,
     SeedLinkAuthError,
+    SeedLinkConfigError,
     SeedLinkError,
     SeedLinkPacket,
     SeedLinkTimeout,
@@ -553,6 +555,73 @@ class TestCollectIdleTimeout:
         assert client._send_command.call_args_list[0].args[0].text == "INFO ID"
 
 
+    def test_one_keepalive_in_flight(self):
+        client = make_client(Protocol.V4)
+        client._streaming = True
+        client._idle_timeout = 0.3
+        client._keepalive = 0.02
+        client._poll_readable = lambda timeout: time.sleep(0.01) or False
+        client._send_command = MagicMock(return_value=None)
+        with pytest.raises(SeedLinkTimeout):
+            next(client.collect(reconnect=False))
+        assert client._send_command.call_count == 1
+
+    def test_caller_time_not_idle(self):
+        client = make_client(Protocol.V4)
+        client._streaming = True
+        client._idle_timeout = 0.1
+        client._poll_readable = lambda timeout: True
+        frames = iter([
+            _RawFrame(station_id="IU_KONO", seqnum=n, payload_format="2",
+                      payload_subformat="D", payload=b"x", info_continues=False)
+            for n in (1, 2)
+        ])
+        client._recv_frame = lambda: next(frames)
+        gen = client.collect(reconnect=False)
+        assert next(gen).seqnum == 1
+        time.sleep(0.2)  # caller busy past the idle timeout
+        assert next(gen).seqnum == 2
+        assert client.is_connected
+
+
+class TestReconnectConfigError:
+    def test_config_error_not_retried(self):
+        client = SeedLink(host="localhost", port=18000, reconnect_delay=0)
+        attempts = 0
+
+        def connect():
+            nonlocal attempts
+            attempts += 1
+            raise SeedLinkConfigError("forced protocol rejected")
+
+        client.connect = connect
+        with pytest.raises(SeedLinkConfigError):
+            client._reconnect_after_delay()
+        assert attempts == 1
+
+
+class TestDefaultTimeouts:
+    def test_io_timeout_applied_without_timeout(self):
+        server = socket.create_server(("127.0.0.1", 0))
+        try:
+            client = SeedLink(host="127.0.0.1", port=server.getsockname()[1])
+            client._connect_socket()
+            assert client._sock.gettimeout() == _IO_TIMEOUT
+            client.close()
+        finally:
+            server.close()
+
+    def test_given_timeout_kept(self):
+        server = socket.create_server(("127.0.0.1", 0))
+        try:
+            client = SeedLink(host="127.0.0.1", port=server.getsockname()[1], timeout=5)
+            client._connect_socket()
+            assert client._sock.gettimeout() == 5
+            client.close()
+        finally:
+            server.close()
+
+
 class TestCollectReconnectLogging:
     def test_connection_loss_and_reconnect_logged(self, caplog):
         client = make_client(Protocol.V4)
@@ -577,23 +646,27 @@ class TestCollectReconnectLogging:
 
 
 class TestCollectJsonError:
-    """A mid-stream v4 JSON ERROR packet must be handled the same way a
-    synchronous ERROR reply line is -- logged and reconnected/raised --
-    not yielded to the caller as an ordinary data packet."""
+    """A mid-stream v4 JSON ERROR packet is logged and skipped, keeping the
+    connection, and is not yielded to the caller as a data packet."""
 
     def _error_frame(self) -> _RawFrame:
         return _RawFrame(station_id="", seqnum=None, payload_format=FORMAT_JSON,
                           payload_subformat=SUBFORMAT_JSON_ERROR,
                           payload=b'{"message": "no such station"}', info_continues=False)
 
-    def test_raised_when_reconnect_false(self, caplog):
+    def test_logged_and_skipped(self, caplog):
         client = make_client(Protocol.V4)
         client._streaming = True
         client._poll_readable = lambda timeout: True
-        client._recv_frame = self._error_frame
+        data_frame = _RawFrame(station_id="IU_KONO", seqnum=8, payload_format="2",
+                                payload_subformat="D", payload=b"x", info_continues=False)
+        frames = iter([self._error_frame(), data_frame])
+        client._recv_frame = lambda: next(frames)
+        gen = client.collect(reconnect=False)
         with caplog.at_level("WARNING"):
-            with pytest.raises(SeedLinkError, match="no such station"):
-                next(client.collect(reconnect=False))
+            pkt = next(gen)
+        assert pkt.seqnum == 8
+        assert client.is_connected
         assert "no such station" in caplog.text
 
 

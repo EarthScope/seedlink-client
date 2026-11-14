@@ -105,6 +105,14 @@ class TestParseStreamlist:
         streams = parse_streamlist("GE_WLF,,MN_AQU")
         assert [s.station_id for s in streams] == ["GE_WLF", "MN_AQU"]
 
+    def test_empty_station_id_skipped(self):
+        streams = parse_streamlist(":B_H_Z,GE_WLF")
+        assert [s.station_id for s in streams] == ["GE_WLF"]
+
+    def test_empty_selectors_use_default(self):
+        streams = parse_streamlist("GE_WLF:", default_selectors="B_H_?")
+        assert streams[0].selectors == ["B_H_?"]
+
 
 class TestReadStreamlistFile:
     def test_basic_file(self, tmp_path):

@@ -33,6 +33,7 @@ from .protocol import (
     MAX_COMMAND_LEN,
     Protocol,
     SeedLinkAuthError,
+    SeedLinkConfigError,
     SeedLinkError,
     SeedLinkResponse,
     generate_client_id,
@@ -90,10 +91,10 @@ def encode(cmd: Command) -> bytes:
     """Return ``cmd``'s wire bytes, rejecting a line over MAX_COMMAND_LEN or
     one with non-ASCII or control characters (e.g. an embedded CR/LF)."""
     if not (cmd.text.isascii() and cmd.text.isprintable()):
-        raise SeedLinkError(f"Command contains non-ASCII or control characters: {cmd.display_text!r}")
+        raise SeedLinkConfigError(f"Command contains non-ASCII or control characters: {cmd.display_text!r}")
     wire = cmd.text.encode("ascii") + cmd.terminator
     if len(wire) > MAX_COMMAND_LEN:
-        raise SeedLinkError(
+        raise SeedLinkConfigError(
             f"Command exceeds the {MAX_COMMAND_LEN}-byte command-line limit: {cmd.display_text!r}"
         )
     return wire
@@ -106,10 +107,28 @@ def _expect_ok(line: str) -> SeedLinkResponse:
     return resp
 
 
+def _expect_forced_ok(line: str) -> SeedLinkResponse:
+    """Like _expect_ok, for a command whose rejection is a configuration
+    error, e.g. SLPROTO for a version forced by the caller."""
+    resp = parse_reply(line)
+    if resp.status == "ERROR":
+        raise SeedLinkConfigError(resp.message or "Server returned ERROR", resp.code)
+    return _expect_ok(line)
+
+
 def _expect_auth_ok(line: str) -> SeedLinkResponse:
     resp = parse_reply(line)
-    if not resp:
+    if resp.status == "ERROR":
         raise SeedLinkAuthError(resp.message or "Authentication failed", resp.code)
+    if not resp:
+        raise SeedLinkError(f"Invalid response to AUTH: {resp.message!r}")
+    return resp
+
+
+def _expect_ok_or_error(line: str) -> SeedLinkResponse:
+    resp = parse_reply(line)
+    if resp.status not in ("OK", "ERROR"):
+        raise SeedLinkError(f"Invalid response: {resp.message!r}")
     return resp
 
 
@@ -123,8 +142,8 @@ def hello() -> Command:
     return Command("HELLO", parse=None)
 
 
-def slproto(version: str = "4.0") -> Command:
-    return Command(f"SLPROTO {version}", parse=_expect_ok)
+def slproto(version: str = "4.0", forced: bool = False) -> Command:
+    return Command(f"SLPROTO {version}", parse=_expect_forced_ok if forced else _expect_ok)
 
 
 def capabilities(flags: str = "EXTREPLY") -> Command:
@@ -151,7 +170,7 @@ def useragent(client_name: str | None, client_version: str | None) -> Command:
 
 def auth_userpass(username: str, password: str) -> Command:
     if " " in username or " " in password:
-        raise SeedLinkError("AUTH USERPASS username/password must not contain spaces")
+        raise SeedLinkConfigError("AUTH USERPASS username/password must not contain spaces")
     return Command(f"AUTH USERPASS {username} {password}", parse=_expect_auth_ok,
                    log_text=f"AUTH USERPASS {username} ****")
 
@@ -162,7 +181,7 @@ def auth_jwt(token: str) -> Command:
 
 def batch() -> Command:
     """BATCH (v3). Non-fatal if rejected -- the caller just stays unbatched."""
-    return Command("BATCH", parse=parse_reply)
+    return Command("BATCH", parse=_expect_ok_or_error)
 
 
 def bye() -> Command:
@@ -196,7 +215,7 @@ def station_v4(station_id: str) -> Command:
 def station_v3(station_id: str, expect_reply: bool) -> Command:
     net, sta = _split_net_sta(station_id)
     if not net or not sta:
-        raise SeedLinkError(f"v3 station ID must be NET_STA: {station_id!r}")
+        raise SeedLinkConfigError(f"v3 station ID must be NET_STA: {station_id!r}")
     return Command(
         f"STATION {sta} {net}", parse=parse_reply if expect_reply else None,
         role="station", stream_id=station_id,
@@ -257,7 +276,7 @@ def data_v3(
     The v3 sequence number is 6 hex digits on the wire, so it wraps at FFFFFF.
     """
     if seqnum is not None:
-        text = f"{cmd_name} {seqnum & 0xFFFFFF:X}"
+        text = f"{cmd_name} {seqnum & 0xFFFFFF:06X}"
         if timestamp:
             text += f" {timestamp}"
     else:
@@ -359,6 +378,7 @@ def plan_handshake(
     client_version: str | None,
     auth: tuple[str, str] | str | None,
     want_batch: bool,
+    protocol_forced: bool = False,
 ) -> list[Command]:
     """Build the post-HELLO handshake commands, in send order.
 
@@ -367,11 +387,12 @@ def plan_handshake(
     Unlike :func:`plan_negotiation`'s v4 commands, these are meant to be
     sent one at a time with its reply read immediately -- each of
     SLPROTO/CAPABILITIES/USERAGENT/AUTH depends on the outcome of the one
-    before it.
+    before it. With ``protocol_forced``, a rejected SLPROTO is a
+    configuration error rather than a retryable one.
     """
     commands: list[Command] = []
     if protocol is Protocol.V4:
-        commands.append(slproto("4.0"))
+        commands.append(slproto("4.0", forced=protocol_forced))
         commands.append(useragent(client_name, client_version))
         if auth is not None:
             if isinstance(auth, str):
@@ -487,7 +508,7 @@ def plan_negotiation(
     if not multistation:
         uni_streams = [s for s in streams if is_wildcard(s.station_id)] or streams
         if len(uni_streams) != 1:
-            raise SeedLinkError("v3 uni-station mode requires exactly one stream")
+            raise SeedLinkConfigError("v3 uni-station mode requires exactly one stream")
         stream = uni_streams[0]
         expect_reply = not batch_active
         commands = [
