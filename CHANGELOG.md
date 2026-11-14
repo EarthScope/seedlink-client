@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
 - Log connection loss and pending reconnect during streaming
 - Track and resume each station received via a wildcard station ID individually in the state file,
