@@ -109,9 +109,9 @@ class Stream:
 def v3_to_v4_selector(selector: str) -> str | None:
     """Convert a v3 stream selector to v4 form.
 
-    v3 selectors are ``[LL]CCC[.T]`` (optional 2-char location, 3-char
-    channel, optional '.'-separated type); v4 selectors are
-    ``LOC_BAND_SOURCE_SUBSOURCE[.T]``. Leading ``-`` characters mean an
+    v3 selectors are ``[!][LL]CCC[.T]`` (optional negation, 2-char location,
+    3-char channel, optional '.'-separated type); v4 selectors are
+    ``[!]LOC_BAND_SOURCE_SUBSOURCE[.T]``. Leading ``-`` characters mean an
     explicit empty (blank) location code, as opposed to no location at all.
 
     Returns:
@@ -120,7 +120,8 @@ def v3_to_v4_selector(selector: str) -> str | None:
         otherwise not a plain 3/4/5-character code) -- the caller should
         send such a selector unconverted.
     """
-    s = selector
+    negated = "!" if selector.startswith("!") else ""
+    s = selector[len(negated):]
     emptylocation = False
     while s.startswith("-"):
         s = s[1:]
@@ -134,11 +135,11 @@ def v3_to_v4_selector(selector: str) -> str | None:
 
     if len(streamid) == 3:
         location = "" if emptylocation else "*"
-        return f"{location}_{streamid[0]}_{streamid[1]}_{streamid[2]}{type_suffix}"
+        return f"{negated}{location}_{streamid[0]}_{streamid[1]}_{streamid[2]}{type_suffix}"
     if len(streamid) == 4:
-        return f"{streamid[0]}_{streamid[1]}_{streamid[2]}_{streamid[3]}{type_suffix}"
+        return f"{negated}{streamid[0]}_{streamid[1]}_{streamid[2]}_{streamid[3]}{type_suffix}"
     if len(streamid) == 5:
-        return f"{streamid[0]}{streamid[1]}_{streamid[2]}_{streamid[3]}_{streamid[4]}{type_suffix}"
+        return f"{negated}{streamid[0]}{streamid[1]}_{streamid[2]}_{streamid[3]}_{streamid[4]}{type_suffix}"
     return None
 
 
@@ -155,7 +156,8 @@ def v4_to_v3_selector(selector: str) -> str | None:
     server rejecting it is possible, and is handled at the negotiation
     level (see :class:`_commands.NegotiationWalk`), not here.
     """
-    streamid, sep, rest = selector.partition(".")
+    negated = "!" if selector.startswith("!") else ""
+    streamid, sep, rest = selector[len(negated):].partition(".")
     type_suffix = f".{rest}" if sep else ""
     parts = streamid.split("_")
 
@@ -167,15 +169,15 @@ def v4_to_v3_selector(selector: str) -> str | None:
     else:
         return None
 
-    if len(band) != 1 or len(source) != 1 or len(subsource) != 1 or len(location) > 2:
+    if len(band) != 1 or len(source) != 1 or len(subsource) != 1 or len(location) > 2 or "!" in location:
         return None
 
     channel = band + source + subsource
     if location == "*":
-        return f"{channel}{type_suffix}"
+        return f"{negated}{channel}{type_suffix}"
     if location == "":
-        return f"--{channel}{type_suffix}"
-    return f"{location}{channel}{type_suffix}"
+        return f"{negated}--{channel}{type_suffix}"
+    return f"{negated}{location}{channel}{type_suffix}"
 
 
 def parse_streamlist(text: str, default_selectors: str | None = None) -> list[Stream]:

@@ -48,6 +48,16 @@ class TestV3ToV4Selector:
     def test_type_preserved(self):
         assert v3_to_v4_selector("00BHZ.D") == "00_B_H_Z.D"
 
+    def test_negated(self):
+        assert v3_to_v4_selector("!BHZ") == "!*_B_H_Z"
+        assert v3_to_v4_selector("!00BHZ") == "!00_B_H_Z"
+        assert v3_to_v4_selector("!--BHZ") == "!_B_H_Z"
+        assert v3_to_v4_selector("!EH?.D") == "!*_E_H_?.D"
+
+    def test_bare_or_doubled_negation_returns_none(self):
+        assert v3_to_v4_selector("!") is None
+        assert v3_to_v4_selector("!!BHZ") is None
+
 
 class TestV4ToV3Selector:
     """The reverse conversion, for a v4-style selector against a v3 server."""
@@ -73,8 +83,16 @@ class TestV4ToV3Selector:
     def test_long_location_has_no_v3_equivalent(self):
         assert v4_to_v3_selector("XXX_B_H_Z") is None
 
+    def test_negated(self):
+        assert v4_to_v3_selector("!*_B_H_Z") == "!BHZ"
+        assert v4_to_v3_selector("!00_B_H_Z") == "!00BHZ"
+        assert v4_to_v3_selector("!_B_H_Z.D") == "!--BHZ.D"
+
+    def test_doubled_negation_returns_none(self):
+        assert v4_to_v3_selector("!!*_B_H_Z") is None
+
     def test_round_trip(self):
-        for v3 in ("BHZ", "00BHZ", "--BHZ", "1BHZ"):
+        for v3 in ("BHZ", "00BHZ", "--BHZ", "1BHZ", "!BHZ", "!00BHZ", "!--BHZ"):
             v4 = v3_to_v4_selector(v3)
             assert v4_to_v3_selector(v4) == v3
 

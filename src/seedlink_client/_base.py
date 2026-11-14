@@ -298,14 +298,14 @@ class _SeedLinkBase:
         if not matching:
             return None
         if not _TRACKABLE_STATION_ID.match(station_id):
-            logger.info("Not tracking station ID with unsupported characters or length: %r",
-                        station_id)
+            logger.debug("Not tracking station ID with unsupported characters or length: %r",
+                         station_id)
             return None
         if not all(w.selectors for w in matching):
             selectors = []
         elif len(matching) > 1 and any(sel.startswith("!") for w in matching for sel in w.selectors):
-            logger.info("Not tracking %s, negated selectors of multiple wildcard entries",
-                        station_id)
+            logger.debug("Not tracking %s, negated selectors of multiple wildcard entries",
+                         station_id)
             return None
         else:
             selectors = list(dict.fromkeys(sel for w in matching for sel in w.selectors))
